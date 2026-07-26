@@ -1,6 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from 'react'
 import { supabase } from './lib/supabase'
-
+import logo from './imports/HOZYN_LOGO.png'
 interface LoggedInUser {
   id: string
   employee_name: string
@@ -73,7 +73,7 @@ function Sidebar({ active, onChange, collapsed, onToggle, permissions }: {
       <div style={{ padding: collapsed ? '12px 0' : '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 10, minHeight: 64 }}>
         {/* Logo on white pill — multiply blend removes white on dark bg */}
         <div style={{ width: 40, height: 40, borderRadius: 10, background: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, margin: collapsed ? '0 auto' : 0, padding: 3, boxShadow: '0 0 0 1px rgba(201,168,76,0.3)' }}>
-          <img src="/src/imports/HOZYN_LOGO.png" alt="HoZyn" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+         <img src={logo} alt="HoZyn" style={{ width: 34, height: 34, objectFit: 'contain' }} />
         </div>
         {!collapsed && (
           <div>
@@ -195,10 +195,10 @@ function Login({ onLogin }: { onLogin: (user: LoggedInUser) => void }) {
           {/* Logo on a styled white card — intentional, not accidental */}
           <div style={{ width: 160, height: 160, margin: '0 auto 24px', background: 'white', borderRadius: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 8px 40px rgba(0,0,0,0.35), 0 0 0 1px rgba(201,168,76,0.25)', padding: 12 }}>
             <img
-              src="/src/imports/HOZYN_LOGO.png"
-              alt="HoZyn Logo"
-              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            />
+  src={logo}
+  alt="HoZyn Logo"
+  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+/>
           </div>
           <div style={{ color: 'rgba(201,168,76,0.8)', fontSize: 11, fontWeight: 600, letterSpacing: '0.22em', textTransform: 'uppercase', marginBottom: 32 }}>Hotel ERP System</div>
           <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13.5, maxWidth: 300, lineHeight: 1.8, margin: '0 auto' }}>
@@ -221,10 +221,10 @@ function Login({ onLogin }: { onLogin: (user: LoggedInUser) => void }) {
           {/* Mini logo on form side — multiply removes white on light bg */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 36 }}>
             <img
-              src="/src/imports/HOZYN_LOGO.png"
-              alt="HoZyn"
-              style={{ width: 44, height: 44, objectFit: 'contain', mixBlendMode: 'multiply' }}
-            />
+  src={logo}
+  alt="HoZyn"
+  style={{ width: 44, height: 44, objectFit: 'contain', mixBlendMode: 'multiply' }}
+/>
             <div>
               <div style={{ fontSize: 18, fontWeight: 800, color: '#0D1F40', fontFamily: "'Playfair Display', serif", lineHeight: 1.1 }}>HoZyn</div>
               <div style={{ fontSize: 10, color: '#C9A84C', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hotel ERP</div>
