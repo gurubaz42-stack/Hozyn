@@ -1,0 +1,19 @@
+{
+  "title": "HoZyn ERP",
+  "description": "HoZyn ERP",
+  "language": "en",
+  "robots": {
+    "index": true
+  },
+  "icons": {
+    "icon": ""
+  },
+  "openGraph": {
+    "image": ""
+  },
+  "analytics": {},
+  "customScripts": {},
+  "accessibility": {
+    "addBypassLinks": false
+  }
+}

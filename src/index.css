@@ -1,0 +1,323 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-serif: 'Playfair Display', serif;
+}
+
+:root {
+  --navy: #0D1F40;
+  --navy-light: #162B54;
+  --gold: #C9A84C;
+  --gold-light: #E4C878;
+  --gold-muted: #F5E9C8;
+  --bg: #F4F6FA;
+  --card: #FFFFFF;
+  --border: #E2E8F0;
+  --text: #1E293B;
+  --text-muted: #64748B;
+  --success: #10B981;
+  --warning: #F59E0B;
+  --danger: #EF4444;
+  --info: #3B82F6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* Sidebar scrollbar hidden by default */
+.sidebar-nav::-webkit-scrollbar {
+  width: 0;
+}
+
+/* Smooth transitions */
+.transition-all {
+  transition: all 0.2s ease;
+}
+
+/* Gold shimmer effect on logo */
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.gold-text {
+  background: linear-gradient(90deg, #C9A84C, #F0D882, #C9A84C);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Status badges */
+.status-available { background: #D1FAE5; color: #065F46; }
+.status-occupied { background: #FEE2E2; color: #991B1B; }
+.status-reserved { background: #DBEAFE; color: #1E40AF; }
+.status-maintenance { background: #FEF3C7; color: #92400E; }
+.status-cleaning { background: #F3E8FF; color: #6B21A8; }
+
+/* Checkin / out status */
+.status-checked-in { background: #D1FAE5; color: #065F46; }
+.status-pending { background: #FEF3C7; color: #92400E; }
+.status-confirmed { background: #DBEAFE; color: #1E40AF; }
+.status-cancelled { background: #FEE2E2; color: #991B1B; }
+.status-checked-out { background: #E2E8F0; color: #475569; }
+
+/* Table styles */
+.erp-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.erp-table th {
+  background: var(--navy);
+  color: white;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  text-align: left;
+}
+.erp-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+  color: var(--text);
+}
+.erp-table tr:hover td {
+  background: #F8FAFD;
+}
+
+/* Modal overlay */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13,31,64,0.45);
+  backdrop-filter: blur(3px);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+/* Form inputs */
+.erp-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-family: 'Inter', sans-serif;
+  color: var(--text);
+  background: white;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.erp-input:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(201,168,76,0.12);
+}
+
+.erp-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 5px;
+}
+
+/* Button styles */
+.btn-primary {
+  background: var(--navy);
+  color: white;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-primary:hover {
+  background: var(--navy-light);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(13,31,64,0.25);
+}
+
+.btn-gold {
+  background: var(--gold);
+  color: white;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-gold:hover {
+  background: var(--gold-light);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(201,168,76,0.3);
+}
+
+.btn-danger {
+  background: #FEE2E2;
+  color: #991B1B;
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border: 1px solid #FECACA;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-danger:hover {
+  background: #FEE2E2;
+  box-shadow: 0 2px 8px rgba(239,68,68,0.2);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  padding: 9px 18px;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 500;
+  border: 1.5px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-ghost:hover {
+  border-color: var(--navy);
+  color: var(--navy);
+}
+
+/* Card */
+.erp-card {
+  background: white;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+/* Animate fade in */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: fadeIn 0.25s ease forwards;
+}
+
+/* POS item cards */
+.pos-item-card {
+  background: white;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+}
+.pos-item-card:hover {
+  border-color: var(--gold);
+  box-shadow: 0 4px 12px rgba(201,168,76,0.15);
+  transform: translateY(-2px);
+}
+
+/* Room grid cards */
+.room-card {
+  background: white;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  cursor: pointer;
+  transition: all 0.18s;
+  position: relative;
+  overflow: hidden;
+}
+.room-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(13,31,64,0.12);
+}
+.room-card.available { border-top: 3px solid var(--success); }
+.room-card.occupied { border-top: 3px solid var(--danger); }
+.room-card.reserved { border-top: 3px solid var(--info); }
+.room-card.maintenance { border-top: 3px solid var(--warning); }
+.room-card.cleaning { border-top: 3px solid #8B5CF6; }
+
+/* Sidebar nav item */
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.72);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.nav-item:hover {
+  background: rgba(255,255,255,0.08);
+  color: white;
+}
+.nav-item.active {
+  background: rgba(201,168,76,0.2);
+  color: #E4C878;
+  border-left: 3px solid #C9A84C;
+}
+
+/* KPI stat card */
+.stat-card {
+  background: white;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 18px 20px;
+  position: relative;
+  overflow: hidden;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+.stat-card.navy::before { background: var(--navy); }
+.stat-card.gold::before { background: var(--gold); }
+.stat-card.green::before { background: var(--success); }
+.stat-card.red::before { background: var(--danger); }
+.stat-card.blue::before { background: var(--info); }
+.stat-card.purple::before { background: #8B5CF6; }
