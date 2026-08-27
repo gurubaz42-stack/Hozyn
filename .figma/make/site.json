@@ -1,19 +1,10 @@
 {
-  "title": "HoZyn ERP",
-  "description": "HoZyn ERP",
-  "language": "en",
+  "description": "Comprehensive cloud-based hotel ERP streamlines guest, room, reservation, POS, and staff management with real-time analytics for efficient hotel operations.",
   "robots": {
-    "index": true
+    "index": false
   },
-  "icons": {
-    "icon": ""
-  },
-  "openGraph": {
-    "image": ""
-  },
-  "analytics": {},
-  "customScripts": {},
   "accessibility": {
-    "addBypassLinks": false
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
   }
 }

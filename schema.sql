@@ -483,7 +483,32 @@ alter table folio_charges
 
 
 -- =============================================================================
--- 11. HOTEL SERVICES
+-- 11. GUEST OPTIONS
+-- =============================================================================
+-- Configurable dropdown values for the Add/Edit Guest form.
+-- type: 'nationality' | 'category' | 'state'
+-- Managed in Settings → Guest Options tab.
+
+create table guest_options (
+    id           uuid        primary key default uuid_generate_v4(),
+    type         text        not null check (type in ('nationality', 'category', 'state')),
+    value        text        not null,
+    -- For type='state': stores the parent nationality/country value this state belongs to.
+    -- NULL for nationality and category rows.
+    parent_value text,
+    sort_order   smallint    not null default 0,
+    created_at   timestamptz not null default now(),
+    unique (type, value, parent_value)
+);
+
+create index guest_options_type_idx on guest_options (type);
+
+-- Also add category and state columns to guests table
+alter table guests add column if not exists category text;
+alter table guests add column if not exists state     text;
+
+-- =============================================================================
+-- 12. HOTEL SERVICES
 -- =============================================================================
 
 -- Master list of ancillary services (spa, laundry, transfers, etc.)
@@ -561,6 +586,7 @@ alter table restaurant_categories  enable row level security;
 alter table restaurant_items       enable row level security;
 alter table restaurant_orders      enable row level security;
 alter table restaurant_order_items enable row level security;
+alter table guest_options          enable row level security;
 alter table hotel_services         enable row level security;
 
 do $$
@@ -570,7 +596,7 @@ declare
         'hotel_settings', 'tax_config', 'room_type', 'roles', 'employees',
         'guests', 'rooms', 'reservations', 'folios', 'folio_charges', 'payments',
         'restaurant_categories', 'restaurant_items', 'restaurant_orders',
-        'restaurant_order_items', 'hotel_services'
+        'restaurant_order_items', 'guest_options', 'hotel_services'
     ];
 begin
     foreach t in array tables loop
@@ -611,6 +637,7 @@ alter publication supabase_realtime add table restaurant_categories;
 alter publication supabase_realtime add table restaurant_items;
 alter publication supabase_realtime add table restaurant_orders;
 alter publication supabase_realtime add table restaurant_order_items;
+alter publication supabase_realtime add table guest_options;
 alter publication supabase_realtime add table hotel_services;
 
 

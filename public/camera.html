@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Guest Photo</title>
+<style>
+* { margin: 0; box-sizing: border-box; }
+body { font-family: sans-serif; background: #0D1F40; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 20px; }
+h2 { color: #C9A84C; font-size: 16px; font-weight: 700; }
+video { border-radius: 12px; border: 3px solid #3B82F6; width: 100%; max-width: 460px; background: #000; display: block; }
+video.ready { border-color: #10B981; }
+#status { color: #94A3B8; font-size: 13px; }
+#status.ok { color: #10B981; font-weight: 600; }
+#err { color: #F87171; font-size: 13px; display: none; }
+.btns { display: flex; gap: 10px; }
+button { padding: 11px 28px; border: none; border-radius: 8px; font-size: 15px; font-weight: 700; cursor: pointer; }
+#capture { background: #334155; color: #64748B; }
+#capture.ready { background: #10B981; color: white; cursor: pointer; }
+#cancel { background: #334155; color: #94A3B8; }
+</style>
+</head>
+<body>
+<h2>📷 Guest Photo Capture</h2>
+<video id="vid" autoplay playsinline muted></video>
+<p id="status">Starting camera…</p>
+<p id="err"></p>
+<div class="btns">
+  <button id="capture" disabled>📸 Capture</button>
+  <button id="cancel">✕ Cancel</button>
+</div>
+<script>
+var vid = document.getElementById('vid');
+var status = document.getElementById('status');
+var errEl = document.getElementById('err');
+var captureBtn = document.getElementById('capture');
+var stream = null;
+var channel = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('guest_photo_channel') : null;
+
+navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } })
+  .then(function(s) {
+    stream = s;
+    vid.srcObject = s;
+    vid.oncanplay = function() {
+      vid.classList.add('ready');
+      captureBtn.classList.add('ready');
+      captureBtn.disabled = false;
+      status.textContent = '✓ Camera ready — click Capture';
+      status.className = 'ok';
+    };
+  })
+  .catch(function(e) {
+    errEl.style.display = 'block';
+    errEl.textContent = '⚠️ ' + e.message;
+    status.textContent = '';
+  });
+
+captureBtn.onclick = function() {
+  if (!stream) return;
+  var w = vid.videoWidth || 640;
+  var h = vid.videoHeight || 480;
+  var canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(vid, 0, 0, w, h);
+  var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  stream.getTracks().forEach(function(t) { t.stop(); });
+  // BroadcastChannel (works when app is top-level window)
+  if (channel) channel.postMessage({ type: 'GUEST_PHOTO_CAPTURED', dataUrl: dataUrl });
+  // localStorage storage event (works when app is inside an iframe)
+  try {
+    localStorage.setItem('guest_photo_capture', JSON.stringify({ dataUrl: dataUrl, ts: Date.now() }));
+    localStorage.removeItem('guest_photo_capture');
+  } catch(e) {}
+  // postMessage to opener as final fallback
+  if (window.opener) { try { window.opener.postMessage({ type: 'GUEST_PHOTO_CAPTURED', dataUrl: dataUrl }, '*'); } catch(e) {} }
+  setTimeout(function() { window.close(); }, 300);
+};
+
+document.getElementById('cancel').onclick = function() {
+  if (stream) stream.getTracks().forEach(function(t) { t.stop(); });
+  window.close();
+};
+</script>
+</body>
+</html>

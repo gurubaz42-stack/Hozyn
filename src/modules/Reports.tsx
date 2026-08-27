@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { fmt } from '../data'
-import { BarChartSVG, AreaChartSVG, PageLoader, ErrorBanner } from '../ui'
+import { BarChartSVG, AreaChartSVG, PageLoader, ErrorBanner, Modal } from '../ui'
 
 type ReportId = 'revenue' | 'occupancy' | 'restaurant' | 'services' | 'forecast'
 
@@ -902,10 +902,626 @@ function ForecastReport() {
   )
 }
 
+// ─── Guest Report ────────────────────────────────────────────────────────────
+
+interface GuestRow {
+  id: string
+  guest_name: string
+  nationality: string | null
+  state: string | null
+  category: string | null
+  age: number | null
+  phone: string | null
+  id_proof_type: string | null
+  visits: number
+  total_nights: number
+  first_checkin: string | null
+  last_checkin: string | null
+}
+
+function calcAge(dob: string | null): number | null {
+  if (!dob) return null
+  return Math.floor((Date.now() - new Date(dob).getTime()) / 31557600000)
+}
+
+function GuestReport() {
+  const [filterNationality, setFilterNationality] = useState('')
+  const [filterState,       setFilterState]       = useState('')
+  const [filterCategory,    setFilterCategory]    = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo,   setDateTo]   = useState('')
+
+  const [rows,          setRows]         = useState<GuestRow[]>([])
+  const [nationalities, setNationalities] = useState<string[]>([])
+  const [states,        setStates]       = useState<string[]>([])
+  const [categories,    setCategories]   = useState<string[]>([])
+  const [loading,       setLoading]      = useState(true)
+  const [error,         setError]        = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+
+    const [guestRes, historyRes] = await Promise.all([
+      supabase.from('guests')
+        .select('id, guest_name, nationality, state, category, date_of_birth, phone, id_proof_type')
+        .eq('is_deleted', false).order('guest_name'),
+      supabase.from('vw_guest_history').select('guest_id, total_stays'),
+    ])
+    if (guestRes.error) { setError(guestRes.error.message); setLoading(false); return }
+
+    const guests = (guestRes.data || []) as {
+      id: string; guest_name: string; nationality: string | null; state: string | null
+      category: string | null; date_of_birth: string | null; phone: string | null
+      id_proof_type: string | null
+    }[]
+
+    const histMap: Record<string, { visits: number }> = {}
+    ;(historyRes.data || []).forEach((h: { guest_id: string; total_stays: number }) => {
+      histMap[h.guest_id] = { visits: Number(h.total_stays) || 0 }
+    })
+
+    setNationalities([...new Set(guests.map(g => g.nationality).filter(Boolean) as string[])].sort())
+    setStates([...new Set(guests.map(g => g.state).filter(Boolean) as string[])].sort())
+    setCategories([...new Set(guests.map(g => g.category).filter(Boolean) as string[])].sort())
+
+    let resQ = supabase.from('reservations')
+      .select('id, guest_id, check_in, expected_check_out, actual_check_out')
+      .neq('status', 'cancelled')
+    if (dateFrom) resQ = resQ.gte('check_in', dateFrom)
+    if (dateTo)   resQ = resQ.lte('check_in', dateTo)
+    const { data: resData } = await resQ
+
+    const resMap: Record<string, { total_nights: number; filtered_visits: number; first_checkin: string | null; last_checkin: string | null }> = {}
+    ;(resData || []).forEach((r: { guest_id: string; check_in: string; expected_check_out: string; actual_check_out: string | null }) => {
+      if (!resMap[r.guest_id]) resMap[r.guest_id] = { total_nights: 0, filtered_visits: 0, first_checkin: null, last_checkin: null }
+      const e = resMap[r.guest_id]
+      e.filtered_visits += 1
+      const checkout = r.actual_check_out || r.expected_check_out
+      e.total_nights += Math.max(1, Math.round((new Date(checkout).getTime() - new Date(r.check_in).getTime()) / 86400000))
+      if (!e.first_checkin || r.check_in < e.first_checkin) e.first_checkin = r.check_in
+      if (!e.last_checkin  || r.check_in > e.last_checkin)  e.last_checkin  = r.check_in
+    })
+
+    const hasDateFilter = !!(dateFrom || dateTo)
+    const result: GuestRow[] = guests
+      .filter(g => hasDateFilter ? !!resMap[g.id] : true)
+      .map(g => ({
+        id: g.id,
+        guest_name: g.guest_name,
+        nationality: g.nationality,
+        state: g.state,
+        category: g.category,
+        age: calcAge(g.date_of_birth),
+        phone: g.phone,
+        id_proof_type: g.id_proof_type,
+        visits: hasDateFilter ? (resMap[g.id]?.filtered_visits ?? 0) : (histMap[g.id]?.visits ?? 0),
+        total_nights: resMap[g.id]?.total_nights ?? 0,
+        first_checkin: resMap[g.id]?.first_checkin ?? null,
+        last_checkin: resMap[g.id]?.last_checkin ?? null,
+      }))
+
+    setRows(result)
+    setLoading(false)
+  }, [dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  const availableStates = filterNationality
+    ? [...new Set(rows.filter(r => r.nationality === filterNationality).map(r => r.state).filter(Boolean) as string[])].sort()
+    : states
+
+  const filtered = rows.filter(r => {
+    if (filterNationality && r.nationality !== filterNationality) return false
+    if (filterState       && r.state       !== filterState)       return false
+    if (filterCategory    && r.category    !== filterCategory)    return false
+    return true
+  })
+
+  const grandGuests  = filtered.length
+  const grandStays   = filtered.reduce((s, r) => s + r.visits, 0)
+  const grandNights  = filtered.reduce((s, r) => s + r.total_nights, 0)
+
+  const fmtDate = (d: string | null) => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
+
+  const resetFilters = () => { setFilterNationality(''); setFilterState(''); setFilterCategory(''); setDateFrom(''); setDateTo('') }
+
+  const exportCSV = () => {
+    const lines = [
+      ['Guest Report'],
+      [`Filters: ${filterNationality || 'All nationalities'} | ${filterState || 'All states'} | ${filterCategory || 'All categories'} | ${dateFrom || 'All'} to ${dateTo || 'All'}`],
+      [],
+      ['#', 'Guest Name', 'Nationality', 'State', 'Guest Category', 'Age', 'Phone', 'ID Proof', 'Visits', 'Nights', 'First Check-in', 'Last Check-in'],
+      ...filtered.map((r, i) => [i + 1, r.guest_name, r.nationality || '', r.state || '', r.category || '', r.age ?? '', r.phone || '', r.id_proof_type || '', r.visits, r.total_nights, fmtDate(r.first_checkin), fmtDate(r.last_checkin)]),
+      [],
+      ['TOTAL', '', '', '', '', '', '', '', grandStays, grandNights],
+    ]
+    const csv = lines.map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url
+    a.download = `guest-report-${new Date().toISOString().split('T')[0]}.csv`; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const selStyle = { padding: '7px 10px', border: '1.5px solid #E2E8F0', borderRadius: 7, fontSize: 12.5, color: '#1E293B', background: 'white', cursor: 'pointer', minWidth: 140 } as React.CSSProperties
+
+  return (
+    <div>
+      {/* Filter bar */}
+      <div className="erp-card" style={{ padding: '14px 18px', marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div>
+          <label className="erp-label">Nationality</label>
+          <select style={selStyle} value={filterNationality} onChange={e => { setFilterNationality(e.target.value); setFilterState('') }}>
+            <option value="">All Nationalities</option>
+            {nationalities.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="erp-label">State</label>
+          <select style={selStyle} value={filterState} onChange={e => setFilterState(e.target.value)} disabled={availableStates.length === 0}>
+            <option value="">All States</option>
+            {availableStates.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="erp-label">Guest Category</label>
+          <select style={selStyle} value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+            <option value="">All Categories</option>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="erp-label">Check-in From</label>
+          <input type="date" className="erp-input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ fontSize: 12.5 }} />
+        </div>
+        <div>
+          <label className="erp-label">Check-in To</label>
+          <input type="date" className="erp-input" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ fontSize: 12.5 }} />
+        </div>
+        <button onClick={resetFilters}
+          style={{ padding: '7px 12px', border: '1.5px solid #E2E8F0', borderRadius: 7, background: 'white', color: '#64748B', fontSize: 12.5, cursor: 'pointer', fontWeight: 600 }}>
+          Clear All
+        </button>
+        <button onClick={exportCSV} disabled={filtered.length === 0}
+          style={{ marginLeft: 'auto', padding: '7px 16px', border: '1.5px solid #E2E8F0', borderRadius: 7, background: 'white', color: '#475569', fontSize: 12.5, cursor: 'pointer', fontWeight: 600 }}>
+          ⬇ Export CSV
+        </button>
+      </div>
+
+      {/* Summary */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+        <SummaryCard label="Guests" value={grandGuests} />
+        <SummaryCard label="Total Visits" value={grandStays} />
+        <SummaryCard label="Total Nights" value={grandNights} />
+      </div>
+
+      {/* Active filter chips */}
+      {(filterNationality || filterState || filterCategory || dateFrom || dateTo) && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          {filterNationality && <span style={{ padding: '3px 10px', background: '#EFF6FF', color: '#1D4ED8', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>🌍 {filterNationality}</span>}
+          {filterState       && <span style={{ padding: '3px 10px', background: '#F0FDF4', color: '#166534', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>📍 {filterState}</span>}
+          {filterCategory    && <span style={{ padding: '3px 10px', background: '#FEF3C7', color: '#92400E', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>🏷 {filterCategory}</span>}
+          {(dateFrom || dateTo) && <span style={{ padding: '3px 10px', background: '#F5F3FF', color: '#5B21B6', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>📅 {dateFrom || '…'} → {dateTo || '…'}</span>}
+        </div>
+      )}
+
+      {loading ? <div style={{ textAlign: 'center', padding: 48, color: '#94A3B8' }}>Loading…</div>
+        : error ? <div style={{ color: '#EF4444', padding: 20 }}>{error}</div>
+        : filtered.length === 0 ? <EmptyState icon="👥" text="No guests match the selected filters" />
+        : (
+        <div className="erp-card">
+          <div style={{ padding: '13px 20px', borderBottom: '1px solid #E2E8F0', background: '#0D1F40', borderRadius: '10px 10px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 15, fontWeight: 700, color: 'white' }}>
+              Guest List
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'rgba(255,255,255,0.5)', marginLeft: 10 }}>{grandGuests} guest{grandGuests !== 1 ? 's' : ''}</span>
+            </div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 28 }}>#</th>
+                  <th>Guest Name</th>
+                  <th>Nationality</th>
+                  <th>State</th>
+                  <th>Guest Category</th>
+                  <th style={{ textAlign: 'center' }}>Age</th>
+                  <th>Phone</th>
+                  <th>ID Proof</th>
+                  <th style={{ textAlign: 'center' }}>Visits</th>
+                  <th style={{ textAlign: 'center' }}>Nights</th>
+                  <th>First Check-in</th>
+                  <th>Last Check-in</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r, i) => (
+                  <tr key={r.id}>
+                    <td style={{ color: '#94A3B8', fontSize: 11 }}>{i + 1}</td>
+                    <td>
+                      <div style={{ fontWeight: 600, color: '#0D1F40' }}>{r.guest_name}</div>
+                      {r.visits > 1 && <div style={{ fontSize: 10.5, color: '#10B981', fontWeight: 600 }}>↩ {r.visits} visits</div>}
+                    </td>
+                    <td>{r.nationality || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td>{r.state || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td>
+                      {r.category
+                        ? <span style={{ padding: '2px 8px', background: '#F1F5F9', borderRadius: 4, fontSize: 11.5, fontWeight: 600, color: '#475569' }}>{r.category}</span>
+                        : <span style={{ color: '#CBD5E1' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign: 'center', fontWeight: 600, color: '#475569' }}>{r.age ?? <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ fontSize: 12.5, color: '#475569' }}>{r.phone || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td>
+                      {r.id_proof_type
+                        ? <span style={{ fontSize: 10.5, padding: '2px 6px', background: '#F8F9FC', borderRadius: 3, color: '#64748B' }}>{r.id_proof_type}</span>
+                        : <span style={{ color: '#CBD5E1' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign: 'center', fontWeight: 700 }}>{r.visits || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ textAlign: 'center', color: '#64748B' }}>{r.total_nights || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ fontSize: 12, color: '#64748B' }}>{fmtDate(r.first_checkin)}</td>
+                    <td style={{ fontSize: 12, color: '#64748B' }}>{fmtDate(r.last_checkin)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: '#F8F9FC', fontWeight: 800 }}>
+                  <td /><td style={{ color: '#0D1F40' }}>Total</td>
+                  <td /><td /><td /><td /><td /><td />
+                  <td style={{ textAlign: 'center' }}>{grandStays}</td>
+                  <td style={{ textAlign: 'center' }}>{grandNights}</td>
+                  <td /><td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Booking Category Report ──────────────────────────────────────────────────
+
+interface BookingRow {
+  reservation_id: string
+  reservation_number: string | null
+  check_in: string
+  check_out: string | null
+  nights: number
+  booking_category: string
+  guest_name: string
+  phone: string | null
+  age: number | null
+  nationality: string | null
+  state: string | null
+}
+
+function BookingCategoryReport() {
+  const [filterCategory, setFilterCategory] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo,   setDateTo]   = useState('')
+  const [rows,     setRows]     = useState<BookingRow[]>([])
+  const [bookingCats, setBookingCats] = useState<string[]>([])
+  const [loading,  setLoading]  = useState(true)
+  const [error,    setError]    = useState<string | null>(null)
+  const [viewRow,  setViewRow]  = useState<BookingRow | null>(null)
+  const [viewDocs, setViewDocs] = useState<{ file_url: string; file_name: string | null }[]>([])
+  const [viewDocsLoading, setViewDocsLoading] = useState(false)
+  const [fullRes, setFullRes] = useState<{ rate_per_night: number; adults: number; children: number; special_requests: string | null; status: string; guest_photo_url: string | null } | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+
+    const [bCatRes, resRes] = await Promise.all([
+      supabase.from('guest_options').select('value').eq('type', 'booking_category').order('value'),
+      (() => {
+        let q = supabase.from('reservations')
+          .select('id, reservation_number, check_in, expected_check_out, actual_check_out, booking_category, guest_id')
+          .neq('status', 'cancelled')
+          .not('booking_category', 'is', null)
+        if (dateFrom) q = q.gte('check_in', dateFrom)
+        if (dateTo)   q = q.lte('check_in', dateTo)
+        return q
+      })(),
+    ])
+
+    setBookingCats((bCatRes.data || []).map((o: { value: string }) => o.value))
+
+    const reservations = (resRes.data || []) as {
+      id: string; reservation_number: string | null; check_in: string
+      expected_check_out: string; actual_check_out: string | null
+      booking_category: string | null; guest_id: string
+    }[]
+
+    if (reservations.length === 0) { setRows([]); setLoading(false); return }
+
+    const guestIds = [...new Set(reservations.map(r => r.guest_id))]
+    const { data: guestData } = await supabase.from('guests')
+      .select('id, guest_name, phone, date_of_birth, nationality, state')
+      .in('id', guestIds)
+
+    const gMap: Record<string, { guest_name: string; phone: string | null; age: number | null; nationality: string | null; state: string | null }> = {}
+    ;(guestData || []).forEach((g: { id: string; guest_name: string; phone: string | null; date_of_birth: string | null; nationality: string | null; state: string | null }) => {
+      gMap[g.id] = { guest_name: g.guest_name, phone: g.phone, age: calcAge(g.date_of_birth), nationality: g.nationality, state: g.state }
+    })
+
+    const result: BookingRow[] = reservations
+      .filter(r => r.booking_category)
+      .map(r => {
+        const checkout = r.actual_check_out || r.expected_check_out || null
+        const checkoutMs = checkout ? new Date(checkout).getTime() : null
+        const checkinMs = new Date(r.check_in).getTime()
+        const nights = checkoutMs ? Math.max(1, Math.round((checkoutMs - checkinMs) / 86400000)) : 0
+        const g = gMap[r.guest_id] || { guest_name: 'Unknown', phone: null, age: null, nationality: null, state: null }
+        return {
+          reservation_id: r.id,
+          reservation_number: r.reservation_number,
+          check_in: r.check_in,
+          check_out: checkout,
+          nights,
+          booking_category: r.booking_category!,
+          guest_name: g.guest_name,
+          phone: g.phone,
+          age: g.age,
+          nationality: g.nationality,
+          state: g.state,
+        }
+      })
+      .sort((a, b) => b.check_in.localeCompare(a.check_in))
+
+    setRows(result)
+    setLoading(false)
+  }, [dateFrom, dateTo])
+
+  useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    if (!viewRow) { setViewDocs([]); setFullRes(null); return }
+    setViewDocsLoading(true)
+    Promise.all([
+      supabase.from('reservation_documents').select('file_url, file_name').eq('reservation_id', viewRow.reservation_id).order('created_at'),
+      supabase.from('reservations').select('rate_per_night, adults, children, special_requests, status, guest_photo_url').eq('id', viewRow.reservation_id).single(),
+    ]).then(([docsRes, resRes]) => {
+      setViewDocs(docsRes.data || [])
+      setFullRes(resRes.data || null)
+      setViewDocsLoading(false)
+    })
+  }, [viewRow])
+
+  const filtered = filterCategory ? rows.filter(r => r.booking_category === filterCategory) : rows
+  const fmtDate = (d: string | null | undefined) => {
+    if (!d) return '—'
+    const dt = new Date(d.includes('T') ? d : d + 'T00:00:00')
+    return isNaN(dt.getTime()) ? '—' : dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
+
+  const exportCSV = () => {
+    const lines = [
+      ['Booking Category Report'],
+      [`Category: ${filterCategory || 'All'} | Date: ${dateFrom || 'All'} to ${dateTo || 'All'}`],
+      [],
+      ['#', 'Booking ID', 'Guest Name', 'Phone', 'Age', 'Nationality', 'State', 'Booking Category', 'Check-in', 'Check-out', 'Nights'],
+      ...filtered.map((r, i) => [i + 1, r.reservation_number || r.reservation_id.slice(0, 8).toUpperCase(), r.guest_name, r.phone || '', r.age ?? '', r.nationality || '', r.state || '', r.booking_category, fmtDate(r.check_in), fmtDate(r.check_out), r.nights]),
+      [], ['TOTAL BOOKINGS', filtered.length, '', '', '', '', '', '', '', '', filtered.reduce((s, r) => s + r.nights, 0)],
+    ]
+    const csv = lines.map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = `booking-category-report-${new Date().toISOString().split('T')[0]}.csv`; a.click(); URL.revokeObjectURL(url)
+  }
+
+  const selStyle = { padding: '7px 10px', border: '1.5px solid #E2E8F0', borderRadius: 7, fontSize: 12.5, color: '#1E293B', background: 'white', cursor: 'pointer', minWidth: 160 } as React.CSSProperties
+  const grandNights = filtered.reduce((s, r) => s + r.nights, 0)
+
+  return (
+    <div>
+      {/* Filters */}
+      <div className="erp-card" style={{ padding: '14px 18px', marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div>
+          <label className="erp-label">Booking Category</label>
+          <select style={selStyle} value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+            <option value="">All Categories</option>
+            {bookingCats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="erp-label">Check-in From</label>
+          <input type="date" className="erp-input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ fontSize: 12.5 }} />
+        </div>
+        <div>
+          <label className="erp-label">Check-in To</label>
+          <input type="date" className="erp-input" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ fontSize: 12.5 }} />
+        </div>
+        <button onClick={() => { setFilterCategory(''); setDateFrom(''); setDateTo('') }}
+          style={{ padding: '7px 12px', border: '1.5px solid #E2E8F0', borderRadius: 7, background: 'white', color: '#64748B', fontSize: 12.5, cursor: 'pointer', fontWeight: 600 }}>
+          Clear
+        </button>
+        <button onClick={exportCSV} disabled={filtered.length === 0}
+          style={{ marginLeft: 'auto', padding: '7px 16px', border: '1.5px solid #E2E8F0', borderRadius: 7, background: 'white', color: '#475569', fontSize: 12.5, cursor: 'pointer', fontWeight: 600 }}>
+          ⬇ Export CSV
+        </button>
+      </div>
+
+      {/* Summary */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+        <SummaryCard label="Bookings" value={filtered.length} sub={filterCategory ? `in "${filterCategory}"` : 'all categories'} />
+        <SummaryCard label="Total Nights" value={grandNights} />
+        <SummaryCard label="Unique Categories" value={[...new Set(filtered.map(r => r.booking_category))].length} />
+      </div>
+
+      {/* Active filter chips */}
+      {(filterCategory || dateFrom || dateTo) && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+          {filterCategory    && <span style={{ padding: '3px 10px', background: '#FDF2F8', color: '#9D174D', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>🛏️ {filterCategory}</span>}
+          {(dateFrom || dateTo) && <span style={{ padding: '3px 10px', background: '#F5F3FF', color: '#5B21B6', borderRadius: 20, fontSize: 12, fontWeight: 600 }}>📅 {dateFrom || '…'} → {dateTo || '…'}</span>}
+        </div>
+      )}
+
+      {loading ? <div style={{ textAlign: 'center', padding: 48, color: '#94A3B8' }}>Loading…</div>
+        : error ? <div style={{ color: '#EF4444', padding: 20 }}>{error}</div>
+        : filtered.length === 0 ? <EmptyState icon="🛏️" text="No bookings found for the selected filters" />
+        : (
+        <div className="erp-card">
+          <div style={{ padding: '13px 20px', borderBottom: '1px solid #E2E8F0', background: '#0D1F40', borderRadius: '10px 10px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 15, fontWeight: 700, color: 'white' }}>
+              Booking Category — Reservations
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'rgba(255,255,255,0.5)', marginLeft: 10 }}>{filtered.length} booking{filtered.length !== 1 ? 's' : ''}</span>
+            </div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 28 }}>#</th>
+                  <th>Booking ID</th>
+                  <th>Guest Name</th>
+                  <th>Mobile</th>
+                  <th style={{ textAlign: 'center' }}>Age</th>
+                  <th>Nationality</th>
+                  <th>State</th>
+                  <th>Booking Category</th>
+                  <th>Check-in</th>
+                  <th>Check-out</th>
+                  <th style={{ textAlign: 'center' }}>Days</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r, i) => (
+                  <tr key={r.reservation_id} onDoubleClick={() => setViewRow(r)} style={{ cursor: 'pointer' }}>
+                    <td style={{ color: '#94A3B8', fontSize: 11 }}>{i + 1}</td>
+                    <td style={{ fontFamily: 'monospace', fontSize: 12, color: '#475569' }}>
+                      {r.reservation_number || r.reservation_id.slice(0, 8).toUpperCase()}
+                    </td>
+                    <td style={{ fontWeight: 600, color: '#0D1F40' }}>{r.guest_name}</td>
+                    <td style={{ fontSize: 12.5, color: '#475569' }}>{r.phone || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ textAlign: 'center', color: '#64748B' }}>{r.age ?? <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ fontSize: 12.5 }}>{r.nationality || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td style={{ fontSize: 12.5 }}>{r.state || <span style={{ color: '#CBD5E1' }}>—</span>}</td>
+                    <td>
+                      <span style={{ padding: '3px 9px', background: '#FDF2F8', borderRadius: 5, fontSize: 12, fontWeight: 600, color: '#9D174D' }}>
+                        {r.booking_category}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 12.5, color: '#475569' }}>{fmtDate(r.check_in)}</td>
+                    <td style={{ fontSize: 12.5, color: '#475569' }}>{fmtDate(r.check_out)}</td>
+                    <td style={{ textAlign: 'center', fontWeight: 700 }}>{r.nights}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: '#F8F9FC', fontWeight: 800 }}>
+                  <td /><td /><td style={{ color: '#0D1F40' }}>Total</td>
+                  <td /><td /><td /><td /><td /><td /><td />
+                  <td style={{ textAlign: 'center' }}>{grandNights}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {viewRow && (
+        <Modal title="Reservation Details" onClose={() => setViewRow(null)} maxWidth={580}>
+          {(() => {
+            const r = viewRow
+            const sc: Record<string, { bg: string; color: string }> = {
+              confirmed:   { bg: '#EFF6FF', color: '#1D4ED8' },
+              checked_in:  { bg: '#D1FAE5', color: '#065F46' },
+              checked_out: { bg: '#F1F5F9', color: '#475569' },
+              cancelled:   { bg: '#FEE2E2', color: '#991B1B' },
+              pending:     { bg: '#FEF3C7', color: '#92400E' },
+            }
+            const status = fullRes?.status || 'confirmed'
+            const badge = sc[status] || sc.confirmed
+            const rate = fullRes?.rate_per_night ?? 0
+            const total = rate * r.nights
+            const rows: [string, string][] = [
+              ['Booking ID',      r.reservation_number || r.reservation_id.slice(0, 8).toUpperCase()],
+              ['Status',          status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())],
+              ['Phone',           r.phone || '—'],
+              ['Nationality',     r.nationality || '—'],
+              ['State',           r.state || '—'],
+              ['Age',             r.age != null ? String(r.age) : '—'],
+              ['Check-in',        fmtDate(r.check_in)],
+              ['Check-out',       fmtDate(r.check_out)],
+              ['Nights',          String(r.nights)],
+              ['Adults',          fullRes ? String(fullRes.adults) : '—'],
+              ['Children',        fullRes ? String(fullRes.children) : '—'],
+              ['Booking Category', r.booking_category],
+              ['Rate / Night',    rate ? `₹${rate.toLocaleString('en-IN')}` : '—'],
+              ['Total Amount',    rate ? `₹${total.toLocaleString('en-IN')}` : '—'],
+              ['Special Requests', fullRes?.special_requests || '—'],
+            ]
+            return (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    {fullRes?.guest_photo_url
+                      ? <img src={fullRes.guest_photo_url} alt={r.guest_name} style={{ width: 64, height: 64, borderRadius: 10, objectFit: 'cover', border: '2.5px solid #10B981', flexShrink: 0, cursor: 'pointer' }} onClick={() => window.open(fullRes.guest_photo_url!, '_blank')} />
+                      : <div style={{ width: 64, height: 64, borderRadius: 10, background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, border: '2px dashed #CBD5E1', flexShrink: 0 }}>👤</div>
+                    }
+                    <div>
+                      <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 700, color: '#0D1F40' }}>{r.guest_name}</div>
+                      <span style={{ padding: '3px 10px', borderRadius: 20, fontSize: 11.5, fontWeight: 700, background: '#FDF2F8', color: '#9D174D' }}>{r.booking_category}</span>
+                    </div>
+                  </div>
+                  <span style={{ padding: '5px 14px', borderRadius: 20, fontSize: 12.5, fontWeight: 700, background: badge.bg, color: badge.color, flexShrink: 0 }}>
+                    {status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                  </span>
+                </div>
+
+                <div style={{ display: 'grid', gap: 0, border: '1px solid #E2E8F0', borderRadius: 10, overflow: 'hidden', marginBottom: 16 }}>
+                  {rows.map(([label, value], i) => (
+                    <div key={label} style={{ display: 'flex', borderBottom: i < rows.length - 1 ? '1px solid #F1F5F9' : 'none', background: i % 2 === 0 ? '#FAFBFC' : 'white' }}>
+                      <div style={{ width: 145, padding: '9px 14px', fontSize: 11.5, fontWeight: 600, color: '#64748B', flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
+                      <div style={{ padding: '9px 14px', fontSize: 13, color: '#1E293B', fontWeight: label === 'Total Amount' ? 700 : 400 }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>ID Proof Documents</div>
+                  {viewDocsLoading
+                    ? <div style={{ fontSize: 13, color: '#94A3B8' }}>Loading…</div>
+                    : viewDocs.length === 0
+                      ? <div style={{ fontSize: 13, color: '#94A3B8', fontStyle: 'italic' }}>No documents attached</div>
+                      : <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {viewDocs.map((d, i) => {
+                            const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(d.file_url)
+                            return (
+                              <a key={i} href={d.file_url} target="_blank" rel="noreferrer"
+                                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, textDecoration: 'none' }}>
+                                {isImage
+                                  ? <img src={d.file_url} alt="" style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 5, flexShrink: 0 }} />
+                                  : <span style={{ fontSize: 24, flexShrink: 0 }}>📄</span>}
+                                <span style={{ fontSize: 13, color: '#1E40AF', fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.file_name || `Document ${i + 1}`}</span>
+                                <span style={{ fontSize: 11, color: '#3B82F6', fontWeight: 600, flexShrink: 0 }}>↗ Open</span>
+                              </a>
+                            )
+                          })}
+                        </div>
+                  }
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button onClick={() => setViewRow(null)}
+                    style={{ padding: '8px 20px', border: '1.5px solid #E2E8F0', borderRadius: 7, background: 'white', color: '#64748B', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}>
+                    Close
+                  </button>
+                </div>
+              </div>
+            )
+          })()}
+        </Modal>
+      )}
+    </div>
+  )
+}
+
 // ─── Main Reports component ───────────────────────────────────────────────────
 
 export default function Reports() {
-  const [active, setActive] = useState<ReportId>('revenue')
+  const [active, setActive] = useState<ReportId | 'guests' | 'booking_category'>('revenue')
 
   return (
     <div className="fade-in" style={{ padding: 24 }}>
@@ -915,13 +1531,21 @@ export default function Reports() {
             <span>{r.icon}</span> {r.label}
           </button>
         ))}
+        <button onClick={() => setActive('guests')} style={{ padding: '8px 16px', borderRadius: 7, border: '1.5px solid', borderColor: active === 'guests' ? '#10B981' : '#E2E8F0', background: active === 'guests' ? '#10B981' : 'white', color: active === 'guests' ? 'white' : '#64748B', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+          👥 Guest Report
+        </button>
+        <button onClick={() => setActive('booking_category')} style={{ padding: '8px 16px', borderRadius: 7, border: '1.5px solid', borderColor: active === 'booking_category' ? '#9D174D' : '#E2E8F0', background: active === 'booking_category' ? '#9D174D' : 'white', color: active === 'booking_category' ? 'white' : '#64748B', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+          🛏️ Booking Category
+        </button>
       </div>
 
-      {active === 'revenue'    && <RevenueReport />}
-      {active === 'occupancy'  && <OccupancyReport />}
-      {active === 'restaurant' && <RestaurantReport />}
-      {active === 'services'   && <ServicesReport />}
-      {active === 'forecast'   && <ForecastReport />}
+      {active === 'revenue'           && <RevenueReport />}
+      {active === 'occupancy'         && <OccupancyReport />}
+      {active === 'restaurant'        && <RestaurantReport />}
+      {active === 'services'          && <ServicesReport />}
+      {active === 'forecast'          && <ForecastReport />}
+      {active === 'guests'            && <GuestReport />}
+      {active === 'booking_category'  && <BookingCategoryReport />}
     </div>
   )
 }

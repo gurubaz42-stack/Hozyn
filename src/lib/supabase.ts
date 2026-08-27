@@ -24,17 +24,22 @@ export const supabase = _client
 // ─── DB row types (match schema.sql column names) ─────────────────────────────
 
 export interface DbGuest {
-  guest_id: string
+  id: string
   guest_name: string
   phone: string | null
   email: string | null
   address: string | null
   nationality: string | null
+  state: string | null
+  category: string | null
   id_proof_type: string | null
   id_number: string | null
   date_of_birth: string | null
   gender: 'male' | 'female' | 'other' | null
   remarks: string | null
+  is_blocked: boolean
+  block_reason: string | null
+  is_deleted: boolean
   total_stays: number
   total_spend: number
   created_at: string

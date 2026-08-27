@@ -26,6 +26,8 @@ interface CheckedInRes {
   amount_paid: number  // pre-payments already recorded
 }
 
+interface TaxConfig { id: string; tax_name: string; rate: number; is_active: boolean }
+
 interface FolioCharge {
   id: string
   charge_type: string
@@ -65,6 +67,10 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
     } catch { return 'cash' }
   })
   const [showInvoice, setShowInvoice] = useState(false)
+  const [taxes, setTaxes] = useState<TaxConfig[]>([])
+  const [selectedTaxId, setSelectedTaxId] = useState<string>('')   // '' = no tax
+  const [serviceCharge, setServiceCharge] = useState<number>(0)
+  const [lateCheckoutRate, setLateCheckoutRate] = useState<number | null>(null) // null = use room rate
   const [completing, setCompleting] = useState(false)
   const [completeError, setCompleteError] = useState<string | null>(null)
   const [hotelInfo, setHotelInfo] = useState<HotelInfo>(DEFAULT_HOTEL)
@@ -146,9 +152,10 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
 
     setGuests(rows)
     setSelected(prev => {
-      if (initialResId) return rows.find(r => r.id === initialResId) ?? rows[0] ?? null
+      if (initialResId) return rows.find(r => r.id === initialResId) ?? null
+      // Keep current selection if still valid; never auto-select
       const keep = prev ? rows.find(r => r.id === prev.id) : null
-      return keep ?? (rows[0] ?? null)
+      return keep ?? null
     })
     setLoading(false)
   }, [])
@@ -166,6 +173,8 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
     load()
     supabase.from('hotel_settings').select('*').eq('id', 'main').maybeSingle()
       .then(({ data }) => { if (data) setHotelInfo({ ...DEFAULT_HOTEL, ...data }) })
+    supabase.from('tax_config').select('id, tax_name, rate, is_active').eq('is_active', true).order('sort_order')
+      .then(({ data }) => { if (data) setTaxes(data as TaxConfig[]) })
   }, [load])
   useRealtime(['reservations', 'folios', 'folio_charges', 'payments', 'rooms'], load)
   useEffect(() => {
@@ -178,9 +187,12 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
   const extraNights = selected
     ? Math.max(0, Math.round((new Date(todayDate).getTime() - new Date(selected.expected_check_out).getTime()) / 86400000))
     : 0
-  const extraRoomCharge = extraNights > 0 && selected ? extraNights * selected.rate_per_night : 0
+  const effectiveLateRate = lateCheckoutRate !== null ? lateCheckoutRate : (selected?.rate_per_night ?? 0)
+  const extraRoomCharge = extraNights > 0 && selected ? extraNights * effectiveLateRate : 0
 
   // Compute from loaded charges if available, else fall back to folio columns
+  const isPaidCharge = (c: { description?: string | null }) => !!(c.description?.includes('(Paid)'))
+  // Include ALL charges in total (paid + unpaid) so the breakdown is accurate
   const liveTotalCharges = (charges.length > 0
     ? charges.reduce((s, c) => s + Number(c.unit_price) * Number(c.quantity), 0)
     : (selected?.total_charges ?? (selected ? selected.rate_per_night * selected.nights : 0))
@@ -188,9 +200,16 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
   const liveTotalTaxes = charges.length > 0
     ? charges.reduce((s, c) => s + Number(c.tax_amount), 0)
     : (selected?.total_taxes ?? 0)
-  const alreadyPaid = selected?.amount_paid ?? 0
+  // Charges already paid at point of service (restaurant paid orders etc.)
+  const paidAtSourceAmount = charges
+    .filter(c => isPaidCharge(c))
+    .reduce((s, c) => s + Number(c.unit_price) * Number(c.quantity) + Number(c.tax_amount), 0)
+  const selectedTax = taxes.find(t => t.id === selectedTaxId) ?? null
+  const roomTaxBase = liveTotalCharges
+  const selectedTaxAmount = selectedTax ? Math.round(liveTotalCharges * selectedTax.rate) / 100 : 0
+  const alreadyPaid = (selected?.amount_paid ?? 0) + paidAtSourceAmount
   const discountAmt = selected ? Math.round((liveTotalCharges - alreadyPaid) * discount / 100) : 0
-  const grandTotal = Math.max(0, liveTotalCharges + liveTotalTaxes - alreadyPaid - discountAmt)
+  const grandTotal = Math.max(0, liveTotalCharges + liveTotalTaxes + selectedTaxAmount + serviceCharge - alreadyPaid - discountAmt)
 
   const ALL_PAY_METHODS = [
     { id: 'cash', label: '💵 Cash' }, { id: 'card', label: '💳 Credit / Debit Card' },
@@ -225,9 +244,32 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
       await supabase.from('folio_charges').insert({
         folio_id: folioId,
         charge_type: 'room',
-        description: `Late checkout — ${extraNights} extra night(s) × ${fmt(selected.rate_per_night)}`,
+        description: `Late checkout — ${extraNights} extra night(s) × ${fmt(effectiveLateRate)}`,
         quantity: extraNights,
-        unit_price: selected.rate_per_night,
+        unit_price: effectiveLateRate,
+      })
+    }
+
+    // Post selected room tax as a folio charge
+    if (selectedTax && selectedTaxAmount > 0 && folioId) {
+      await supabase.from('folio_charges').insert({
+        folio_id: folioId,
+        charge_type: 'tax',
+        description: `${selectedTax.tax_name} (${selectedTax.rate}%) on room charges`,
+        quantity: 1,
+        unit_price: selectedTaxAmount,
+        tax_amount: 0,
+      })
+    }
+
+    if (serviceCharge > 0 && folioId) {
+      await supabase.from('folio_charges').insert({
+        folio_id: folioId,
+        charge_type: 'other',
+        description: 'Service Charge',
+        quantity: 1,
+        unit_price: serviceCharge,
+        tax_amount: 0,
       })
     }
 
@@ -256,7 +298,7 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
       await supabase.from('rooms').update({ room_status: 'cleaning', housekeeping_status: 'dirty' }).eq('id', resRow.room_id)
     }
 
-    setCompleting(false); setSelected(null); setDiscount(0); setCharges([]); load()
+    setCompleting(false); setSelected(null); setDiscount(0); setCharges([]); setLateCheckoutRate(null); setSelectedTaxId(''); setServiceCharge(0); load()
   }
 
   if (loading) return <PageLoader label="Loading folios…" />
@@ -312,7 +354,7 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                         {matches.length === 0 ? (
                           <div style={{ padding: '14px 16px', fontSize: 13, color: '#94A3B8' }}>{q ? `No checked-in guest matching "${searchQuery}"` : 'Type to search…'}</div>
                         ) : matches.map(g => (
-                          <div key={g.id} onMouseDown={() => { setSelected(g); setSearchQuery(''); setShowSearchDrop(false); setDiscount(0); setCharges([]) }}
+                          <div key={g.id} onMouseDown={() => { setSelected(g); setSearchQuery(''); setShowSearchDrop(false); setDiscount(0); setCharges([]); setLateCheckoutRate(null); setSelectedTaxId(''); setServiceCharge(0) }}
                             style={{ padding: '11px 16px', cursor: 'pointer', borderBottom: '1px solid #F1F5F9', display: 'flex', alignItems: 'center', gap: 10 }}
                             onMouseEnter={e => (e.currentTarget.style.background = '#F8F9FC')}
                             onMouseLeave={e => (e.currentTarget.style.background = 'white')}
@@ -336,6 +378,70 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
               </div>
             </div>
 
+            {/* Guest list — shown when nothing selected yet */}
+            {!selected && (() => {
+              const today = new Date().toISOString().split('T')[0]
+              const overdue = guests.filter(g => g.expected_check_out < today)
+              const todayList = guests.filter(g => g.expected_check_out === today)
+              const upcoming = guests.filter(g => g.expected_check_out > today)
+
+              const GuestCard = (g: CheckedInRes) => (
+                <div key={g.id} onClick={() => { setSelected(g); setDiscount(0); setCharges([]); setLateCheckoutRate(null); setServiceCharge(0) }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1.5px solid #E2E8F0', borderRadius: 10, background: 'white', cursor: 'pointer', transition: 'box-shadow 0.13s' }}
+                  onMouseEnter={e => (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 10px rgba(0,0,0,0.09)'}
+                  onMouseLeave={e => (e.currentTarget as HTMLElement).style.boxShadow = 'none'}
+                >
+                  <div style={{ width: 38, height: 38, borderRadius: '50%', background: g.expected_check_out < today ? '#FEE2E2' : '#0D1F40', display: 'flex', alignItems: 'center', justifyContent: 'center', color: g.expected_check_out < today ? '#EF4444' : '#C9A84C', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
+                    {g.guest_name.split(' ').map(n => n[0]).join('').slice(0, 2)}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, color: '#0D1F40', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.guest_name}</div>
+                    <div style={{ fontSize: 11.5, color: '#64748B' }}>Room {g.room_number} · {g.room_type} · Out: {g.expected_check_out}</div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+                    {g.expected_check_out < today && (
+                      <span style={{ fontSize: 11, padding: '2px 8px', background: '#FEE2E2', color: '#991B1B', borderRadius: 6, fontWeight: 700 }}>⚠ Overdue</span>
+                    )}
+                    {g.expected_check_out === today && (
+                      <span style={{ fontSize: 11, padding: '2px 8px', background: '#FEF7E4', color: '#92400E', borderRadius: 6, fontWeight: 700 }}>Today</span>
+                    )}
+                    {g.amount_paid > 0 && (
+                      <span style={{ fontSize: 11, padding: '2px 8px', background: '#D1FAE5', color: '#065F46', borderRadius: 6, fontWeight: 600 }}>Pre-paid</span>
+                    )}
+                  </div>
+                </div>
+              )
+
+              const Section = ({ label, color, items }: { label: string; color: string; items: CheckedInRes[] }) => items.length === 0 ? null : (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, display: 'inline-block' }} />
+                    {label} ({items.length})
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {items.map(GuestCard)}
+                  </div>
+                </div>
+              )
+
+              return (
+                <div className="erp-card" style={{ padding: 20 }}>
+                  <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 14, fontWeight: 700, color: '#0D1F40', marginBottom: 16 }}>
+                    Pending Checkouts
+                  </div>
+                  {guests.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: 24, color: '#94A3B8', fontSize: 13 }}>No guests pending checkout</div>
+                  ) : (
+                    <>
+                      <Section label="Overdue" color="#EF4444" items={overdue} />
+                      <Section label="Due Today" color="#C9A84C" items={todayList} />
+                      <Section label="Future Checkouts" color="#94A3B8" items={upcoming} />
+                    </>
+                  )}
+                </div>
+              )
+            })()}
+
             {selected && (
               <div className="erp-card">
                 <div style={{ padding: '14px 20px', borderBottom: '1px solid #E2E8F0' }}>
@@ -347,8 +453,25 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                     {!selected.folio_id && <span style={{ color: '#F59E0B', marginLeft: 8 }}>⚠ No folio — showing estimated room charges</span>}
                   </div>
                   {extraNights > 0 && (
-                    <div style={{ marginTop: 8, padding: '7px 12px', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 6, fontSize: 12.5, color: '#92400E', fontWeight: 600 }}>
-                      ⏰ Guest exceeded checkout by {extraNights} day(s) — {fmt(extraRoomCharge)} late checkout charge added to bill
+                    <div style={{ marginTop: 8, padding: '10px 14px', background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, fontSize: 12.5, color: '#92400E' }}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>⏰ Guest exceeded checkout by {extraNights} day(s)</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600 }}>Late checkout rate per day:</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontWeight: 700 }}>₹</span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={lateCheckoutRate !== null ? lateCheckoutRate : effectiveLateRate}
+                            onChange={e => setLateCheckoutRate(parseFloat(e.target.value) || 0)}
+                            style={{ width: 100, padding: '4px 8px', border: '1.5px solid #FCD34D', borderRadius: 6, background: 'white', color: '#92400E', fontWeight: 700, fontSize: 13 }}
+                          />
+                          {lateCheckoutRate !== null && (
+                            <button onClick={() => setLateCheckoutRate(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B45309', fontSize: 12, textDecoration: 'underline' }}>Reset to room rate</button>
+                          )}
+                        </div>
+                        <span style={{ fontWeight: 800, color: '#D97706' }}>Total: {fmt(extraRoomCharge)}</span>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -356,7 +479,11 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                   {alreadyPaid > 0 && (
                     <div style={{ margin: '0 0 0 0', padding: '10px 20px', background: '#F0FDF4', borderBottom: '1px solid #A7F3D0', display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 16 }}>✅</span>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: '#065F46' }}>{fmt(alreadyPaid)} already collected — deducted from balance due</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: '#065F46' }}>
+                        {fmt(selected?.amount_paid ?? 0)} advance paid
+                        {paidAtSourceAmount > 0 ? ` + ${fmt(paidAtSourceAmount)} paid at restaurant` : ''}
+                        {' '}— deducted from balance due
+                      </span>
                     </div>
                   )}
                   <table className="erp-table">
@@ -394,7 +521,7 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                       {extraNights > 0 && (
                         <tr key="overdue" style={{ background: '#FFFBEB' }}>
                           <td style={{ fontWeight: 600, color: '#92400E' }}>⏰ Late Checkout</td>
-                          <td style={{ color: '#92400E', fontSize: 12.5 }}>{extraNights} extra night(s) × {fmt(selected.rate_per_night)}</td>
+                          <td style={{ color: '#92400E', fontSize: 12.5 }}>{extraNights} extra night(s) × {fmt(effectiveLateRate)}</td>
                           <td style={{ textAlign: 'right', fontWeight: 700, color: '#D97706' }}>{fmt(extraRoomCharge)}</td>
                           <td style={{ textAlign: 'right' }}><span style={{ fontSize: 11, padding: '2px 7px', background: '#FEF3C7', color: '#92400E', borderRadius: 4, fontWeight: 600 }}>Due</span></td>
                         </tr>
@@ -407,6 +534,18 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                         <tr>
                           <td colSpan={3} style={{ color: '#10B981', fontWeight: 600 }}>✓ Already Paid</td>
                           <td style={{ textAlign: 'right', color: '#10B981', fontWeight: 600 }}>− {fmt(alreadyPaid)}</td>
+                        </tr>
+                      )}
+                      {selectedTax && selectedTaxAmount > 0 && (
+                        <tr>
+                          <td colSpan={3} style={{ color: '#92400E', fontWeight: 600 }}>📊 {selectedTax.tax_name} ({selectedTax.rate}%)</td>
+                          <td style={{ textAlign: 'right', color: '#92400E', fontWeight: 600 }}>+ {fmt(selectedTaxAmount)}</td>
+                        </tr>
+                      )}
+                      {serviceCharge > 0 && (
+                        <tr>
+                          <td colSpan={3} style={{ color: '#7C3AED', fontWeight: 600 }}>🛎 Service Charge</td>
+                          <td style={{ textAlign: 'right', color: '#7C3AED', fontWeight: 600 }}>+ {fmt(serviceCharge)}</td>
                         </tr>
                       )}
                       {discount > 0 && (
@@ -434,28 +573,81 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                 <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 15, fontWeight: 700, color: 'white' }}>Payment</div>
               </div>
               <div style={{ padding: 16 }}>
-                <div style={{ marginBottom: 14 }}>
-                  <label className="erp-label">Discount (%)</label>
-                  <input className="erp-input" type="number" min={0} max={100} value={discount}
-                    onChange={e => setDiscount(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))} />
+                {/* Room Tax selector */}
+                {taxes.length > 0 && (
+                  <div style={{ marginBottom: 14 }}>
+                    <label className="erp-label">Room Tax</label>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div
+                        onClick={() => setSelectedTaxId('')}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', border: '1.5px solid', borderColor: selectedTaxId === '' ? '#0D1F40' : '#E2E8F0', borderRadius: 8, background: selectedTaxId === '' ? '#EFF2F8' : 'white', cursor: 'pointer' }}
+                      >
+                        <span style={{ fontSize: 13, fontWeight: 600, color: selectedTaxId === '' ? '#0D1F40' : '#64748B' }}>No Tax</span>
+                        <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid', borderColor: selectedTaxId === '' ? '#0D1F40' : '#CBD5E1', background: selectedTaxId === '' ? '#0D1F40' : 'white', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {selectedTaxId === '' && <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'white' }} />}
+                        </div>
+                      </div>
+                      {taxes.map(t => (
+                        <div key={t.id}
+                          onClick={() => setSelectedTaxId(t.id)}
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', border: '1.5px solid', borderColor: selectedTaxId === t.id ? '#C9A84C' : '#E2E8F0', borderRadius: 8, background: selectedTaxId === t.id ? '#FEF7E4' : 'white', cursor: 'pointer' }}
+                        >
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: selectedTaxId === t.id ? '#92400E' : '#1E293B' }}>{t.tax_name}</div>
+                            <div style={{ fontSize: 11, color: '#94A3B8' }}>{t.rate}% · {selectedTaxId === t.id ? fmt(Math.round(liveTotalCharges * t.rate) / 100) : `on ${fmt(liveTotalCharges)}`}</div>
+                          </div>
+                          <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid', borderColor: selectedTaxId === t.id ? '#C9A84C' : '#CBD5E1', background: selectedTaxId === t.id ? '#C9A84C' : 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            {selectedTaxId === t.id && <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'white' }} />}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="erp-label">Discount (%)</label>
+                    <input className="erp-input" type="number" min={0} max={100} value={discount}
+                      onChange={e => setDiscount(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label className="erp-label">Service Charge (₹)</label>
+                    <input className="erp-input" type="number" min={0} value={serviceCharge}
+                      onChange={e => setServiceCharge(Math.max(0, parseFloat(e.target.value) || 0))} />
+                  </div>
                 </div>
                 <div style={{ background: '#F8F9FC', borderRadius: 8, padding: 14, border: '1px solid #E2E8F0', marginBottom: 14 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#64748B', marginBottom: 4 }}>
-                    <span>Total Charges</span><span>{fmt(liveTotalCharges + liveTotalTaxes)}</span>
+                    <span>Total Charges</span><span>{fmt(liveTotalCharges)}</span>
                   </div>
-                  {alreadyPaid > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#10B981', fontWeight: 600, marginBottom: 4 }}>
-                      <span>✓ Already Paid</span><span>− {fmt(alreadyPaid)}</span>
+                  {liveTotalTaxes > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#64748B', marginBottom: 4 }}>
+                      <span>Item Taxes</span><span>{fmt(liveTotalTaxes)}</span>
                     </div>
                   )}
-                  {liveTotalTaxes > 0 && alreadyPaid === 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#64748B', marginBottom: 4 }}>
-                      <span>Taxes</span><span>{fmt(liveTotalTaxes)}</span>
+                  {selectedTax && selectedTaxAmount > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#92400E', fontWeight: 600, marginBottom: 4 }}>
+                      <span>📊 {selectedTax.tax_name} ({selectedTax.rate}%)</span><span>+ {fmt(selectedTaxAmount)}</span>
+                    </div>
+                  )}
+                  {serviceCharge > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#7C3AED', fontWeight: 600, marginBottom: 4 }}>
+                      <span>🛎 Service Charge</span><span>+ {fmt(serviceCharge)}</span>
+                    </div>
+                  )}
+                  {(selected?.amount_paid ?? 0) > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#10B981', fontWeight: 600, marginBottom: 4 }}>
+                      <span>✓ Advance Paid</span><span>− {fmt(selected?.amount_paid ?? 0)}</span>
+                    </div>
+                  )}
+                  {paidAtSourceAmount > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#10B981', fontWeight: 600, marginBottom: 4 }}>
+                      <span>✓ Paid at Restaurant</span><span>− {fmt(paidAtSourceAmount)}</span>
                     </div>
                   )}
                   {discount > 0 && (
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, color: '#10B981', marginBottom: 4 }}>
-                      <span>Discount</span><span>− {fmt(discountAmt)}</span>
+                      <span>Discount ({discount}%)</span><span>− {fmt(discountAmt)}</span>
                     </div>
                   )}
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 17, fontWeight: 800, color: '#0D1F40', fontFamily: "'Playfair Display', serif", marginTop: 8, paddingTop: 8, borderTop: '1px solid #E2E8F0' }}>
@@ -567,6 +759,18 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                     <td style={{ padding: '8px 12px', textAlign: 'right', color: '#10B981', fontWeight: 600 }}>− {fmt(alreadyPaid)}</td>
                   </tr>
                 )}
+                {selectedTax && selectedTaxAmount > 0 && (
+                  <tr>
+                    <td style={{ padding: '8px 12px', color: '#92400E', fontWeight: 600 }}>📊 {selectedTax.tax_name} ({selectedTax.rate}%)</td>
+                    <td style={{ padding: '8px 12px', textAlign: 'right', color: '#92400E', fontWeight: 600 }}>+ {fmt(selectedTaxAmount)}</td>
+                  </tr>
+                )}
+                {serviceCharge > 0 && (
+                  <tr>
+                    <td style={{ padding: '8px 12px', color: '#7C3AED', fontWeight: 600 }}>🛎 Service Charge</td>
+                    <td style={{ padding: '8px 12px', textAlign: 'right', color: '#7C3AED', fontWeight: 600 }}>+ {fmt(serviceCharge)}</td>
+                  </tr>
+                )}
                 {discount > 0 && (
                   <tr>
                     <td style={{ padding: '8px 12px', color: '#10B981' }}>Discount ({discount}%)</td>
@@ -604,7 +808,8 @@ export default function Checkout({ initialResId }: { initialResId?: string } = {
                 alreadyPaid,
                 discount,
                 discountAmt,
-                grandTotal: liveTotalCharges + liveTotalTaxes,
+                serviceCharge,
+                grandTotal: liveTotalCharges + liveTotalTaxes + selectedTaxAmount + serviceCharge,
                 payMethod,
               })
             }} style={{ border: '1.5px solid #0D1F40', color: '#0D1F40' }}>⬇ Download PDF</button>

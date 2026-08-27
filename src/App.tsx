@@ -1,6 +1,8 @@
 import { useState, useEffect, lazy, Suspense } from 'react'
 import { supabase } from './lib/supabase'
-import logo from './imports/HOZYN_LOGO.png'
+import { useOrderNotification } from './lib/useOrderNotification'
+import { useNotifications, type AppNotification } from './lib/useNotifications'
+
 interface LoggedInUser {
   id: string
   employee_name: string
@@ -39,10 +41,17 @@ const nav = [
   { id: 'settings',     label: 'Settings',         icon: '⚙️' },
 ]
 
-function ActiveModule({ id, onNavigate, currentUser, checkoutResId }: { id: string; onNavigate: (m: string, resId?: string) => void; currentUser: LoggedInUser; checkoutResId?: string }) {
+function ActiveModule({ id, onNavigate, currentUser, checkoutResId, guestsAutoAdd, settingsInitial }: {
+  id: string
+  onNavigate: (m: string, resId?: string, action?: string) => void
+  currentUser: LoggedInUser
+  checkoutResId?: string
+  guestsAutoAdd?: boolean
+  settingsInitial?: { tab?: string; goType?: string }
+}) {
   switch (id) {
     case 'dashboard':    return <Dashboard onNavigate={onNavigate} />
-    case 'guests':       return <Guests />
+    case 'guests':       return <Guests autoOpenAdd={guestsAutoAdd} onNavigate={onNavigate} />
     case 'rooms':        return <Rooms />
     case 'reservations': return <Reservations onNavigate={onNavigate} />
     case 'restaurant':   return <Restaurant />
@@ -51,7 +60,7 @@ function ActiveModule({ id, onNavigate, currentUser, checkoutResId }: { id: stri
     case 'reports':      return <Reports />
     case 'employees':    return <Employees currentUser={currentUser} />
     case 'invoices':     return <Invoices />
-    case 'settings':     return <Settings />
+    case 'settings':     return <Settings key={settingsInitial?.tab || 'settings'} initialTab={settingsInitial?.tab} initialGoType={settingsInitial?.goType as 'nationality' | 'category' | 'state' | undefined} />
     default:             return null
   }
 }
@@ -73,7 +82,7 @@ function Sidebar({ active, onChange, collapsed, onToggle, permissions }: {
       <div style={{ padding: collapsed ? '12px 0' : '12px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', gap: 10, minHeight: 64 }}>
         {/* Logo on white pill — multiply blend removes white on dark bg */}
         <div style={{ width: 40, height: 40, borderRadius: 10, background: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, margin: collapsed ? '0 auto' : 0, padding: 3, boxShadow: '0 0 0 1px rgba(201,168,76,0.3)' }}>
-         <img src={logo} alt="HoZyn" style={{ width: 34, height: 34, objectFit: 'contain' }} />
+          <img src="/src/imports/HOZYN_LOGO.png" alt="HoZyn" style={{ width: 34, height: 34, objectFit: 'contain' }} />
         </div>
         {!collapsed && (
           <div>
@@ -108,8 +117,15 @@ function Sidebar({ active, onChange, collapsed, onToggle, permissions }: {
 
 // ─── Top Bar ──────────────────────────────────────────────────────────────────
 
-function TopBar({ module, user, onLogout }: { module: string; user: LoggedInUser | null; onLogout: () => void }) {
+function TopBar({ module, user, onLogout, notifications, unread, muted, toggleMute, markAllRead, clearAll, ICONS }: {
+  module: string; user: LoggedInUser | null; onLogout: () => void
+  notifications: AppNotification[]; unread: number; muted: boolean
+  toggleMute: () => void; markAllRead: () => void; clearAll: () => void
+  ICONS: Record<string, string>
+}) {
+  const [open, setOpen] = useState(false)
   const label = nav.find(n => n.id === module)?.label || module
+
   if (!user || typeof user !== 'object' || !user.employee_name) return (
     <header style={{ background: 'white', borderBottom: '1px solid #E2E8F0', padding: '0 22px', height: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 30 }}>
       <div style={{ fontSize: 16, fontWeight: 700, color: '#0D1F40', fontFamily: "'Playfair Display', serif" }}>{label}</div>
@@ -117,6 +133,7 @@ function TopBar({ module, user, onLogout }: { module: string; user: LoggedInUser
     </header>
   )
   const initials = user.employee_name.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase()
+
   return (
     <header style={{ background: 'white', borderBottom: '1px solid #E2E8F0', padding: '0 22px', height: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 30 }}>
       <div>
@@ -124,7 +141,69 @@ function TopBar({ module, user, onLogout }: { module: string; user: LoggedInUser
         <div style={{ fontSize: 11.5, color: '#94A3B8' }}>HoZyn Hotel ERP &bull; {new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6, position: 'relative', fontSize: 18 }}>🔔<span style={{ position: 'absolute', top: 4, right: 4, width: 7, height: 7, background: '#C9A84C', borderRadius: '50%', border: '1.5px solid white' }} /></button>
+
+        {/* Notification bell */}
+        <div style={{ position: 'relative' }}>
+          <button onClick={() => { setOpen(o => !o); if (!open) markAllRead() }}
+            style={{ background: open ? '#F1F5F9' : 'none', border: '1.5px solid', borderColor: open ? '#E2E8F0' : 'transparent', cursor: 'pointer', padding: '5px 8px', borderRadius: 8, position: 'relative', fontSize: 18, lineHeight: 1, display: 'flex', alignItems: 'center' }}>
+            {muted ? '🔕' : '🔔'}
+            {unread > 0 && !open && (
+              <span style={{ position: 'absolute', top: 2, right: 2, minWidth: 16, height: 16, background: '#EF4444', borderRadius: 8, border: '1.5px solid white', fontSize: 9, fontWeight: 800, color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>
+                {unread > 9 ? '9+' : unread}
+              </span>
+            )}
+          </button>
+
+          {open && (
+            <div style={{ position: 'absolute', top: 44, right: 0, width: 360, background: 'white', borderRadius: 12, boxShadow: '0 16px 48px rgba(13,31,64,0.18)', border: '1px solid #E2E8F0', zIndex: 999, overflow: 'hidden' }}
+              onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div style={{ padding: '12px 16px', background: '#0D1F40', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontFamily: "'Playfair Display',serif", color: 'white', fontWeight: 700, fontSize: 14 }}>Notifications {unread > 0 && <span style={{ fontSize: 11, color: '#C9A84C' }}>({unread} new)</span>}</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'}
+                    style={{ background: muted ? '#334155' : '#1E3A5F', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, cursor: 'pointer', color: 'white', fontSize: 13, padding: '3px 8px', fontWeight: 600 }}>
+                    {muted ? '🔕 Unmute' : '🔔 Mute'}
+                  </button>
+                  {notifications.length > 0 && (
+                    <button onClick={clearAll} title="Clear all"
+                      style={{ background: 'none', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, cursor: 'pointer', color: '#94A3B8', fontSize: 11, padding: '3px 8px' }}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* List */}
+              <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+                {notifications.length === 0
+                  ? <div style={{ padding: '32px 16px', textAlign: 'center', color: '#94A3B8', fontSize: 13 }}>
+                      <div style={{ fontSize: 28, marginBottom: 8 }}>🔔</div>
+                      No notifications yet
+                    </div>
+                  : notifications.map(n => (
+                    <div key={n.id} style={{ display: 'flex', gap: 12, padding: '11px 16px', borderBottom: '1px solid #F1F5F9', background: n.read ? 'white' : '#FFFBEB', alignItems: 'flex-start' }}>
+                      <span style={{ fontSize: 20, flexShrink: 0, lineHeight: 1.3 }}>{ICONS[n.type]}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#0D1F40' }}>{n.title}</div>
+                        <div style={{ fontSize: 12, color: '#475569', marginTop: 2, lineHeight: 1.4 }}>{n.body}</div>
+                        <div style={{ fontSize: 10.5, color: '#94A3B8', marginTop: 4 }}>
+                          {n.at.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })} &bull; {n.at.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                        </div>
+                      </div>
+                      {!n.read && <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#C9A84C', flexShrink: 0, marginTop: 5 }} />}
+                    </div>
+                  ))
+                }
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Close panel on outside click */}
+        {open && <div style={{ position: 'fixed', inset: 0, zIndex: 998 }} onClick={() => setOpen(false)} />}
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', background: '#F8F9FC', borderRadius: 8, border: '1px solid #E2E8F0' }}>
           <div style={{ width: 28, height: 28, borderRadius: '50%', background: '#0D1F40', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#C9A84C', fontSize: 11, fontWeight: 700 }}>{initials}</div>
           <div>
@@ -195,10 +274,10 @@ function Login({ onLogin }: { onLogin: (user: LoggedInUser) => void }) {
           {/* Logo on a styled white card — intentional, not accidental */}
           <div style={{ width: 160, height: 160, margin: '0 auto 24px', background: 'white', borderRadius: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 8px 40px rgba(0,0,0,0.35), 0 0 0 1px rgba(201,168,76,0.25)', padding: 12 }}>
             <img
-  src={logo}
-  alt="HoZyn Logo"
-  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-/>
+              src="/src/imports/HOZYN_LOGO.png"
+              alt="HoZyn Logo"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
           </div>
           <div style={{ color: 'rgba(201,168,76,0.8)', fontSize: 11, fontWeight: 600, letterSpacing: '0.22em', textTransform: 'uppercase', marginBottom: 32 }}>Hotel ERP System</div>
           <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13.5, maxWidth: 300, lineHeight: 1.8, margin: '0 auto' }}>
@@ -221,10 +300,10 @@ function Login({ onLogin }: { onLogin: (user: LoggedInUser) => void }) {
           {/* Mini logo on form side — multiply removes white on light bg */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 36 }}>
             <img
-  src={logo}
-  alt="HoZyn"
-  style={{ width: 44, height: 44, objectFit: 'contain', mixBlendMode: 'multiply' }}
-/>
+              src="/src/imports/HOZYN_LOGO.png"
+              alt="HoZyn"
+              style={{ width: 44, height: 44, objectFit: 'contain', mixBlendMode: 'multiply' }}
+            />
             <div>
               <div style={{ fontSize: 18, fontWeight: 800, color: '#0D1F40', fontFamily: "'Playfair Display', serif", lineHeight: 1.1 }}>HoZyn</div>
               <div style={{ fontSize: 10, color: '#C9A84C', fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hotel ERP</div>
@@ -349,12 +428,19 @@ export default function App() {
   const [user, setUser] = useState<LoggedInUser | null>(readSession)
   const [activeModule, setActiveModule] = useState('dashboard')
   const [checkoutResId, setCheckoutResId] = useState<string | undefined>(undefined)
+  const [guestsAutoAdd, setGuestsAutoAdd] = useState(false)
+  const [settingsInitial, setSettingsInitial] = useState<{ tab?: string; goType?: string } | undefined>(undefined)
   const [collapsed, setCollapsed] = useState(false)
+
+  // These hooks MUST stay before any conditional return (Rules of Hooks)
+  const hasAll = user?.permissions?.includes('all')
+  const hasRestaurant = !!(hasAll || user?.permissions?.includes('restaurant'))
+  const isManagement = !!(hasAll || user?.permissions?.includes('management'))
+  useOrderNotification(hasRestaurant)
+  const { notifications, unread, muted, toggleMute, markAllRead, clearAll, ICONS } = useNotifications(isManagement)
 
   useEffect(() => { document.title = 'HoZyn Hotel ERP' }, [])
 
-  // Safety net: if React state was lost but session still exists (e.g. after
-  // error boundary reset or Strict Mode double-invoke), restore it.
   useEffect(() => {
     if (!user) {
       const saved = readSession()
@@ -374,7 +460,6 @@ export default function App() {
 
   if (!user || typeof user !== 'object' || !('employee_name' in user)) return <Login onLogin={handleLogin} />
 
-  const hasAll = user.permissions?.includes('all')
   const allowedIds = hasAll ? nav.map(n => n.id) : (user.permissions ?? [])
 
   // If current module is not allowed, show first allowed or a fallback
@@ -384,12 +469,29 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', background: '#F4F6FA', minHeight: '100vh' }}>
-      <Sidebar active={safeModule} onChange={setActiveModule} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} permissions={user.permissions ?? []} />
+      <Sidebar active={safeModule} onChange={m => { setCheckoutResId(undefined); setGuestsAutoAdd(false); setActiveModule(m) }} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} permissions={user.permissions ?? []} />
       <div style={{ marginLeft: sidebarW, flex: 1, minWidth: 0, transition: 'margin-left 0.2s ease' }}>
-        <TopBar module={safeModule} user={user} onLogout={handleLogout} />
+        <TopBar module={safeModule} user={user} onLogout={handleLogout} notifications={notifications} unread={unread} muted={muted} toggleMute={toggleMute} markAllRead={markAllRead} clearAll={clearAll} ICONS={ICONS} />
         <main style={{ minHeight: 'calc(100vh - 58px)' }}>
           <Suspense fallback={<ModuleLoader />}>
-            <ActiveModule id={safeModule} onNavigate={(m, resId) => { setCheckoutResId(resId ?? undefined); setActiveModule(m) }} currentUser={user!} checkoutResId={checkoutResId} />
+            <ActiveModule
+              id={safeModule}
+              onNavigate={(m, resId, action) => {
+                setCheckoutResId(resId ?? undefined)
+                setGuestsAutoAdd(m === 'guests' && action === 'add')
+                if (m === 'settings' && action?.startsWith('guest_options:')) {
+                  const goType = action.split(':')[1]
+                  setSettingsInitial({ tab: 'guest_options', goType })
+                } else if (m !== 'settings') {
+                  setSettingsInitial(undefined)
+                }
+                setActiveModule(m)
+              }}
+              currentUser={user!}
+              checkoutResId={checkoutResId}
+              guestsAutoAdd={guestsAutoAdd}
+              settingsInitial={settingsInitial}
+            />
           </Suspense>
         </main>
       </div>

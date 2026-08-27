@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { useRealtime } from '../lib/useRealtime'
 import { fmt } from '../data'
@@ -16,15 +16,18 @@ const KITCHEN_TABS = [
   { id: 'preparing', label: 'Preparing', color: '#3B82F6', bg: '#DBEAFE', text: '#1E40AF' },
   { id: 'ready',     label: 'Ready',     color: '#10B981', bg: '#D1FAE5', text: '#065F46' },
   { id: 'delivered', label: 'Delivered', color: '#94A3B8', bg: '#F1F5F9', text: '#475569' },
+  { id: 'cancelled', label: 'Cancelled', color: '#EF4444', bg: '#FEE2E2', text: '#991B1B' },
 ] as const
 
-function KitchenBoard({ orders, orderLineItems, onStatusChange, onRefresh }: {
+function KitchenBoard({ orders, orderLineItems, onStatusChange, onRefresh, kitchenTab, setKitchenTab, onCancel }: {
   orders: Order[]
   orderLineItems: OrderLineItem[]
-  onStatusChange: (id: string, status: string) => void
+  onStatusChange: (id: string, status: string, nextTab: string) => void
   onRefresh: () => void
+  kitchenTab: 'pending' | 'preparing' | 'ready' | 'delivered' | 'cancelled'
+  setKitchenTab: (t: 'pending' | 'preparing' | 'ready' | 'delivered' | 'cancelled') => void
+  onCancel: (order: Order) => void
 }) {
-  const [kitchenTab, setKitchenTab] = useState<'pending' | 'preparing' | 'ready' | 'delivered'>('pending')
   const filtered = orders.filter(o => o.order_status === kitchenTab)
 
   const nextAction: Record<string, { label: string; next: string; style: React.CSSProperties }> = {
@@ -66,7 +69,7 @@ function KitchenBoard({ orders, orderLineItems, onStatusChange, onRefresh }: {
       {/* Order cards */}
       {filtered.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 24px', color: '#94A3B8', fontSize: 14 }}>
-          <div style={{ fontSize: 36, marginBottom: 10 }}>{kitchenTab === 'pending' ? '⏳' : kitchenTab === 'preparing' ? '👨‍🍳' : kitchenTab === 'ready' ? '✅' : '📦'}</div>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>{kitchenTab === 'pending' ? '⏳' : kitchenTab === 'preparing' ? '👨‍🍳' : kitchenTab === 'ready' ? '✅' : kitchenTab === 'cancelled' ? '🚫' : '📦'}</div>
           No {tab.label.toLowerCase()} orders right now
         </div>
       ) : (
@@ -102,14 +105,25 @@ function KitchenBoard({ orders, orderLineItems, onStatusChange, onRefresh }: {
                 </div>
 
                 {/* Footer */}
-                <div style={{ padding: '10px 16px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ padding: '10px 16px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 14, fontWeight: 800, color: '#C9A84C', fontFamily: "'Playfair Display', serif" }}>{fmt(order.grand_total ?? 0)}</span>
-                  {action && (
-                    <button onClick={() => onStatusChange(order.id, action.next)}
-                      style={{ ...action.style, padding: '5px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
-                      {action.label}
-                    </button>
-                  )}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {['pending', 'preparing'].includes(order.order_status) && (
+                      <button onClick={() => onCancel(order)}
+                        style={{ padding: '5px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700, background: '#FEE2E2', color: '#DC2626', border: '1px solid #FECACA' }}>
+                        ✕ Cancel
+                      </button>
+                    )}
+                    {action && (
+                      <button onClick={() => {
+                        setKitchenTab(action.next as typeof kitchenTab)
+                        onStatusChange(order.id, action.next, action.next)
+                      }}
+                        style={{ ...action.style, padding: '5px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                        {action.label}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             )
@@ -134,15 +148,19 @@ export default function RestaurantPOS() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'order' | 'kitchen' | 'menu'>('order')
+  const [kitchenTab, setKitchenTab] = useState<'pending' | 'preparing' | 'ready' | 'delivered' | 'cancelled'>('pending')
+  const [cancelOrder, setCancelOrder] = useState<Order | null>(null)
+  const [cancelling, setCancelling] = useState(false)
   const [occupiedRooms, setOccupiedRooms] = useState<{ room_number: string; guest_name: string }[]>([])
 
   // Order state
   const [activeCategory, setActiveCategory] = useState('')
   const [orderItems, setOrderItems] = useState<OrderItem[]>([])
-  const [billToRoom, setBillToRoom] = useState(false)
+  // orderType: 'room' = bill to checked-in guest room, 'walkin' = pay at restaurant
+  const [orderType, setOrderType] = useState<'room' | 'walkin'>('room')
   const [roomNumber, setRoomNumber] = useState('')
-  const [tableNumber, setTableNumber] = useState('')
-  const [payMethod, setPayMethod] = useState<'cash' | 'card' | 'upi'>('card')
+  const [paidAtRestaurant, setPaidAtRestaurant] = useState(false) // room guest paid here instead of billing to room
+  const [payMethod, setPayMethod] = useState<'cash' | 'card' | 'upi'>('cash')
   const [placing, setPlacing] = useState(false)
   const [orderPlaced, setOrderPlaced] = useState(false)
 
@@ -212,15 +230,15 @@ export default function RestaurantPOS() {
 
   const placeOrder = async () => {
     if (orderItems.length === 0) return
+    if (orderType === 'room' && !roomNumber) { alert('Please select a checked-in guest room.'); return }
     setPlacing(true)
     const orderSubtotal = orderItems.reduce((s, o) => s + o.price * o.quantity, 0)
     const orderTax = orderItems.reduce((s, o) => s + Math.round(o.price * o.quantity * o.taxRate / 100), 0)
     const orderTotal = orderSubtotal + orderTax
 
-    // If billing to room, resolve folio_id from the room's active reservation
-    // reservations has room_id FK, not room_number — look up room first
+    // Resolve folio_id for room orders
     let folioId: string | null = null
-    if (billToRoom && roomNumber) {
+    if (orderType === 'room' && roomNumber) {
       const { data: roomRow } = await supabase
         .from('rooms').select('id').eq('room_number', roomNumber).maybeSingle()
       if (roomRow) {
@@ -234,15 +252,17 @@ export default function RestaurantPOS() {
       }
     }
 
+    const isPaidHere = orderType === 'room' && paidAtRestaurant
+
     const { data: newOrder, error: err } = await supabase.from('restaurant_orders').insert({
-      room_number: billToRoom ? (roomNumber || null) : null,
-      table_number: !billToRoom ? (tableNumber || null) : null,
+      room_number: orderType === 'room' ? (roomNumber || null) : null,
+      table_number: null,
       order_status: 'pending',
       subtotal: orderSubtotal,
       tax_amount: orderTax,
       grand_total: orderTotal,
-      is_billed_to_room: billToRoom,
-      payment_method: billToRoom ? null : payMethod,
+      is_billed_to_room: orderType === 'room',
+      payment_method: isPaidHere ? payMethod : (orderType === 'room' ? null : payMethod),
       folio_id: folioId,
     }).select('id').single()
     if (err) { alert('Error: ' + err.message); setPlacing(false); return }
@@ -256,10 +276,11 @@ export default function RestaurantPOS() {
 
     // Post folio charge so it appears in checkout
     if (folioId) {
+      const itemDesc = orderItems.map(o => `${o.item_name} ×${o.quantity}`).join(', ')
       await supabase.from('folio_charges').insert({
         folio_id: folioId,
         charge_type: 'restaurant',
-        description: orderItems.map(o => `${o.item_name} ×${o.quantity}`).join(', '),
+        description: isPaidHere ? `${itemDesc} (Paid)` : itemDesc,
         quantity: 1,
         unit_price: orderSubtotal,
         tax_amount: orderTax,
@@ -268,12 +289,19 @@ export default function RestaurantPOS() {
     }
 
     setOrderPlaced(true); setPlacing(false)
-    setTimeout(() => { setOrderItems([]); setOrderPlaced(false); setRoomNumber(''); setTableNumber(''); load() }, 2000)
+    setTimeout(() => { setOrderItems([]); setOrderPlaced(false); setRoomNumber(''); setPaidAtRestaurant(false); load() }, 2000)
   }
 
-  const updateOrderStatus = async (orderId: string, status: string) => {
+  const updateOrderStatus = async (orderId: string, status: string, _nextTab?: string) => {
     await supabase.from('restaurant_orders').update({ order_status: status }).eq('id', orderId)
     load()
+  }
+
+  const handleCancelOrder = async () => {
+    if (!cancelOrder) return
+    setCancelling(true)
+    await supabase.from('restaurant_orders').update({ order_status: 'cancelled' }).eq('id', cancelOrder.id)
+    setCancelling(false); setCancelOrder(null); load()
   }
 
   // Menu management logic
@@ -411,30 +439,45 @@ export default function RestaurantPOS() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 15, fontWeight: 700, color: '#0D1F40', borderTop: '1px solid #F1F5F9', paddingTop: 6, marginTop: 2 }}><span>Total</span><span>{fmt(total)}</span></div>
                   </div>
                   <div style={{ marginBottom: 12 }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 13, color: '#475569', marginBottom: 8 }}>
-                      <input type="checkbox" checked={billToRoom} onChange={e => setBillToRoom(e.target.checked)} style={{ accentColor: '#C9A84C' }} />
-                      Bill to Room
-                    </label>
-                    {billToRoom ? (
-                      <>
-                        <select className="erp-input" value={occupiedRooms.some(r => r.room_number === roomNumber) ? roomNumber : ''} onChange={e => setRoomNumber(e.target.value)} style={{ marginBottom: 6 }}>
-                          <option value="">— Select from checked-in rooms —</option>
+                    {/* Order type toggle */}
+                    <div style={{ display: 'flex', gap: 4, background: '#F1F5F9', borderRadius: 8, padding: 3, marginBottom: 12 }}>
+                      {(['room', 'walkin'] as const).map(t => (
+                        <button key={t} onClick={() => { setOrderType(t); setRoomNumber(''); setPaidAtRestaurant(false) }}
+                          style={{ flex: 1, padding: '7px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                            background: orderType === t ? (t === 'room' ? '#0D1F40' : '#C9A84C') : 'transparent',
+                            color: orderType === t ? 'white' : '#64748B' }}>
+                          {t === 'room' ? '🛏 Room Guest' : '🚶 Walk-in'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {orderType === 'room' ? (
+                      <div>
+                        <select className="erp-input" value={roomNumber} onChange={e => setRoomNumber(e.target.value)} style={{ marginBottom: 10 }}>
+                          <option value="">— Select checked-in guest —</option>
                           {occupiedRooms.map(r => (
                             <option key={r.room_number} value={r.room_number}>Room {r.room_number} — {r.guest_name}</option>
                           ))}
                         </select>
-                        <input className="erp-input" placeholder="Or type room number manually" value={roomNumber} onChange={e => setRoomNumber(e.target.value)} style={{ marginBottom: 8 }} />
-
-                      </>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 13, marginBottom: paidAtRestaurant ? 10 : 0, padding: '8px 10px', background: paidAtRestaurant ? '#D1FAE5' : '#F8F9FC', borderRadius: 7, border: `1.5px solid ${paidAtRestaurant ? '#6EE7B7' : '#E2E8F0'}` }}>
+                          <input type="checkbox" checked={paidAtRestaurant} onChange={e => setPaidAtRestaurant(e.target.checked)} style={{ accentColor: '#10B981' }} />
+                          <div>
+                            <div style={{ fontWeight: 600, color: paidAtRestaurant ? '#065F46' : '#475569' }}>Paid at Restaurant</div>
+                            <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 1 }}>Guest paid here — shows as settled in checkout</div>
+                          </div>
+                        </label>
+                        {paidAtRestaurant && (
+                          <div style={{ display: 'flex', gap: 5 }}>
+                            {(['cash', 'card', 'upi'] as const).map(m => (
+                              <button key={m} onClick={() => setPayMethod(m)} style={{ flex: 1, padding: '6px', border: '1.5px solid', borderColor: payMethod === m ? '#0D1F40' : '#E2E8F0', borderRadius: 6, background: payMethod === m ? '#0D1F40' : 'white', color: payMethod === m ? 'white' : '#64748B', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', textTransform: 'uppercase' }}>{m}</button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     ) : (
-                      <>
-                        <input className="erp-input" placeholder="Table number (optional)" value={tableNumber} onChange={e => setTableNumber(e.target.value)} style={{ marginBottom: 8 }} />
-                        <div style={{ display: 'flex', gap: 5 }}>
-                          {(['cash', 'card', 'upi'] as const).map(m => (
-                            <button key={m} onClick={() => setPayMethod(m)} style={{ flex: 1, padding: '6px', border: '1.5px solid', borderColor: payMethod === m ? '#0D1F40' : '#E2E8F0', borderRadius: 6, background: payMethod === m ? '#0D1F40' : 'white', color: payMethod === m ? 'white' : '#64748B', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', textTransform: 'uppercase' }}>{m}</button>
-                          ))}
-                        </div>
-                      </>
+                      <div style={{ fontSize: 12.5, color: '#94A3B8', padding: '10px 12px', background: '#F8F9FC', borderRadius: 7, border: '1px solid #E2E8F0' }}>
+                        🚶 Walk-in order — payment collected at counter, no folio linked.
+                      </div>
                     )}
                   </div>
                   {orderPlaced ? (
@@ -453,7 +496,7 @@ export default function RestaurantPOS() {
 
       {/* KITCHEN STATUS */}
       {activeTab === 'kitchen' && (
-        <KitchenBoard orders={orders} orderLineItems={orderLineItems} onStatusChange={updateOrderStatus} onRefresh={load} />
+        <KitchenBoard orders={orders} orderLineItems={orderLineItems} onStatusChange={updateOrderStatus} onRefresh={load} kitchenTab={kitchenTab} setKitchenTab={setKitchenTab} onCancel={setCancelOrder} />
       )}
 
       {/* MENU MANAGEMENT */}
@@ -560,6 +603,28 @@ export default function RestaurantPOS() {
             </div>
           </div>
         </Modal>
+      )}
+
+      {cancelOrder && (
+        <div className="modal-overlay">
+          <div style={{ background: 'white', borderRadius: 12, padding: 28, maxWidth: 360, width: '100%', textAlign: 'center', boxShadow: '0 20px 60px rgba(13,31,64,0.2)' }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>🚫</div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: '#0D1F40', marginBottom: 6 }}>Cancel Order?</div>
+            <div style={{ color: '#64748B', fontSize: 13, marginBottom: 6 }}>
+              Order <strong>#{cancelOrder.order_number || cancelOrder.id.slice(0, 8)}</strong>
+            </div>
+            <div style={{ color: '#64748B', fontSize: 13, marginBottom: 20 }}>
+              {cancelOrder.room_number ? `Room ${cancelOrder.room_number}` : cancelOrder.table_number ? `Table ${cancelOrder.table_number}` : 'Walk-in'} · {fmt(cancelOrder.grand_total ?? 0)}
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button className="btn-ghost" onClick={() => setCancelOrder(null)}>Keep Order</button>
+              <button onClick={handleCancelOrder} disabled={cancelling}
+                style={{ padding: '8px 20px', background: '#DC2626', color: 'white', border: 'none', borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>
+                {cancelling ? 'Cancelling…' : 'Yes, Cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

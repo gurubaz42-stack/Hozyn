@@ -120,11 +120,12 @@ body {
   inset: 0;
   background: rgba(13,31,64,0.45);
   backdrop-filter: blur(3px);
-  z-index: 50;
+  z-index: 1000;
+  overflow-y: auto;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: 20px;
+  align-items: flex-start;
+  padding: 40px 20px;
 }
 
 /* Form inputs */

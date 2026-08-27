@@ -9,6 +9,7 @@ interface HotelInfo {
 }
 interface TaxRow { id: string; tax_name: string; rate: number; applicable_on: string; is_active: boolean; sort_order: number }
 interface RoomType { id: string; type_name: string; base_rate: number; extra_adult_rate: number; extra_child_rate: number; max_occupancy: number }
+interface GuestOption { id: string; type: 'nationality' | 'category' | 'state' | 'booking_category'; value: string; parent_value?: string | null; sort_order: number }
 
 const DEFAULTS: HotelInfo = {
   hotel_name: 'HoZyn Hotel', address: '', phone: '', email: '', website: '',
@@ -29,8 +30,10 @@ function setPayActive(map: Record<string, boolean>) {
   localStorage.setItem('hozyn_pay_methods', JSON.stringify(map))
 }
 
-export default function HotelSettings() {
-  const [tab, setTab] = useState<'hotel' | 'taxes' | 'room_types' | 'payments'>('hotel')
+export default function HotelSettings({ initialTab, initialGoType }: { initialTab?: string; initialGoType?: GuestOption['type'] } = {}) {
+  const [tab, setTab] = useState<'hotel' | 'taxes' | 'room_types' | 'payments' | 'guest_options'>(
+    (initialTab as 'hotel' | 'taxes' | 'room_types' | 'payments' | 'guest_options') || 'hotel'
+  )
 
   // Hotel info
   const [hotelInfo, setHotelInfo] = useState<HotelInfo>(DEFAULTS)
@@ -57,6 +60,40 @@ export default function HotelSettings() {
   const [rtSaving, setRtSaving] = useState(false)
   const [rtError, setRtError] = useState<string | null>(null)
   const [rtDeleteConfirm, setRtDeleteConfirm] = useState<string | null>(null)
+
+  // Guest options (Nationality / Category / State)
+  const [guestOptions, setGuestOptions] = useState<GuestOption[]>([])
+  const [goLoading, setGoLoading] = useState(true)
+  const [goType, setGoType] = useState<'nationality' | 'category' | 'state' | 'booking_category'>(initialGoType || 'nationality')
+  const [goInput, setGoInput] = useState('')
+  const [goStateCountry, setGoStateCountry] = useState('')  // parent country when adding a state
+  const [goSaving, setGoSaving] = useState(false)
+  const [goError, setGoError] = useState<string | null>(null)
+
+  const loadGuestOptions = useCallback(async () => {
+    setGoLoading(true)
+    const { data } = await supabase.from('guest_options').select('*').order('type').order('sort_order').order('value')
+    setGuestOptions((data || []) as GuestOption[])
+    setGoLoading(false)
+  }, [])
+
+  const addGuestOption = async () => {
+    const val = goInput.trim()
+    if (!val) { setGoError('Value cannot be empty'); return }
+    if (goType === 'state' && !goStateCountry) { setGoError('Please select a country for this state'); return }
+    const parentVal = goType === 'state' ? goStateCountry : null
+    const exists = guestOptions.some(o => o.type === goType && o.value.toLowerCase() === val.toLowerCase() && (o.parent_value || null) === parentVal)
+    if (exists) { setGoError(`"${val}" already exists`); return }
+    setGoSaving(true); setGoError(null)
+    const { error } = await supabase.from('guest_options').insert({ type: goType, value: val, parent_value: parentVal, sort_order: 0 })
+    if (error) { setGoError(error.message); setGoSaving(false); return }
+    setGoInput(''); setGoSaving(false); loadGuestOptions()
+  }
+
+  const deleteGuestOption = async (id: string) => {
+    await supabase.from('guest_options').delete().eq('id', id)
+    loadGuestOptions()
+  }
 
   // Payment methods
   const [payActive, setPayActiveState] = useState<Record<string, boolean>>(() => {
@@ -86,7 +123,7 @@ export default function HotelSettings() {
     setRtLoading(false)
   }, [])
 
-  useEffect(() => { loadHotel(); loadTaxes(); loadRoomTypes() }, [loadHotel, loadTaxes, loadRoomTypes])
+  useEffect(() => { loadHotel(); loadTaxes(); loadRoomTypes(); loadGuestOptions() }, [loadHotel, loadTaxes, loadRoomTypes, loadGuestOptions])
 
   const saveHotel = async () => {
     setHotelSaving(true); setHotelMsg(null)
@@ -167,6 +204,7 @@ export default function HotelSettings() {
   const tabs = [
     { id: 'hotel', label: '🏨 Hotel Information' }, { id: 'taxes', label: '📊 Taxes' },
     { id: 'room_types', label: '🛏 Room Types' }, { id: 'payments', label: '💳 Payment Methods' },
+    { id: 'guest_options', label: '👤 Guest Options' },
   ]
 
   return (
@@ -325,6 +363,106 @@ export default function HotelSettings() {
           </div>
         </div>
       )}
+
+      {tab === 'guest_options' && (() => {
+        const GO_TYPES: { id: GuestOption['type']; label: string; icon: string }[] = [
+          { id: 'nationality',       label: 'Nationality / Country', icon: '🌍' },
+          { id: 'state',             label: 'State / Region', icon: '📍' },
+          { id: 'category',          label: 'Guest Category', icon: '🏷️' },
+          { id: 'booking_category',  label: 'Booking Category', icon: '🛏️' },
+        ]
+        const countries = guestOptions.filter(o => o.type === 'nationality').map(o => o.value)
+        const filtered = goType === 'state'
+          ? guestOptions.filter(o => o.type === 'state')
+          : guestOptions.filter(o => o.type === goType)
+
+        // Group states by country
+        const stateGroups = goType === 'state'
+          ? filtered.reduce((acc, o) => {
+              const key = o.parent_value || '(No Country)'
+              if (!acc[key]) acc[key] = []
+              acc[key].push(o)
+              return acc
+            }, {} as Record<string, GuestOption[]>)
+          : null
+
+        return (
+          <div>
+            <div style={{ fontSize: 13, color: '#64748B', marginBottom: 16 }}>
+              Manage dropdown values for guest profiles. States are linked to their country — selecting a country in guest form filters its states.
+            </div>
+            {/* Sub-tabs */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+              {GO_TYPES.map(t => (
+                <button key={t.id} onClick={() => { setGoType(t.id); setGoInput(''); setGoStateCountry(''); setGoError(null) }}
+                  style={{ padding: '7px 16px', borderRadius: 8, border: '1.5px solid', borderColor: goType === t.id ? '#C9A84C' : '#E2E8F0', background: goType === t.id ? '#FEF7E4' : 'white', color: goType === t.id ? '#92400E' : '#64748B', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Add row */}
+            <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+              {goType === 'state' && (
+                <select className="erp-input" value={goStateCountry} onChange={e => { setGoStateCountry(e.target.value); setGoError(null) }} style={{ minWidth: 180 }}>
+                  <option value="">Select country…</option>
+                  {countries.map(c => <option key={c} value={c}>{c}</option>)}
+                  {countries.length === 0 && <option disabled>Add nationalities first</option>}
+                </select>
+              )}
+              <input
+                className="erp-input"
+                placeholder={`Add new ${GO_TYPES.find(t => t.id === goType)?.label ?? goType}…`}
+                value={goInput}
+                onChange={e => { setGoInput(e.target.value); setGoError(null) }}
+                onKeyDown={e => { if (e.key === 'Enter') addGuestOption() }}
+                style={{ flex: 1, minWidth: 160 }}
+              />
+              <button className="btn-primary" onClick={addGuestOption} disabled={goSaving || !goInput.trim()} style={{ whiteSpace: 'nowrap' }}>
+                {goSaving ? 'Adding…' : '+ Add'}
+              </button>
+            </div>
+            {goError && (
+              <div style={{ marginBottom: 12, padding: '9px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 13, color: '#991B1B' }}>⚠️ {goError}</div>
+            )}
+
+            {/* List */}
+            {goLoading ? (
+              <div style={{ textAlign: 'center', padding: 24, color: '#94A3B8', fontSize: 13 }}>Loading…</div>
+            ) : filtered.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 28, color: '#94A3B8', fontSize: 13, border: '1.5px dashed #E2E8F0', borderRadius: 10 }}>
+                No {GO_TYPES.find(t => t.id === goType)?.label} options yet. Add one above.
+              </div>
+            ) : goType === 'state' && stateGroups ? (
+              // States grouped by country
+              Object.entries(stateGroups).sort(([a], [b]) => a.localeCompare(b)).map(([country, states]) => (
+                <div key={country} style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    🌍 {country}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+                    {states.map(o => (
+                      <div key={o.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', border: '1.5px solid #E2E8F0', borderRadius: 8, background: 'white' }}>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: '#1E293B' }}>📍 {o.value}</span>
+                        <button onClick={() => deleteGuestOption(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#EF4444', fontSize: 16, lineHeight: 1, padding: '0 2px' }} title="Delete">×</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+                {filtered.map(o => (
+                  <div key={o.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', border: '1.5px solid #E2E8F0', borderRadius: 10, background: 'white' }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 500, color: '#1E293B' }}>{o.value}</span>
+                    <button onClick={() => deleteGuestOption(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#EF4444', fontSize: 16, lineHeight: 1, padding: '0 2px' }} title="Delete">×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Tax modal */}
       {showTaxModal && (

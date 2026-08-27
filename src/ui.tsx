@@ -1,19 +1,23 @@
 // Shared UI primitives — modals, inputs, tables, badges
 // No heavy dependencies — keeps every lazy chunk small
 
-export function Modal({ title, onClose, children, maxWidth = 640 }: {
-  title: string; onClose: () => void; children: React.ReactNode; maxWidth?: number
+import React from 'react'
+import { createPortal } from 'react-dom'
+
+export function Modal({ title, onClose, children, maxWidth = 640, disableBackdropClose = false }: {
+  title: string; onClose: () => void; children: React.ReactNode; maxWidth?: number; disableBackdropClose?: boolean
 }) {
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: 12, width: '100%', maxWidth, maxHeight: '90vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(13,31,64,0.2)' }}>
+  return createPortal(
+    <div className="modal-overlay" onClick={disableBackdropClose ? undefined : onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: 12, width: '100%', maxWidth, boxShadow: '0 20px 60px rgba(13,31,64,0.2)', margin: 'auto' }}>
         <div style={{ padding: '18px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#0D1F40', borderRadius: '12px 12px 0 0' }}>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 17, fontWeight: 700, color: 'white' }}>{title}</div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.7)', cursor: 'pointer', fontSize: 20, lineHeight: 1 }}>×</button>
         </div>
         <div style={{ padding: 24 }}>{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -179,5 +183,3 @@ export function ErrorBanner({ msg, onRetry }: { msg: string; onRetry?: () => voi
     </div>
   )
 }
-
-import React from 'react'
